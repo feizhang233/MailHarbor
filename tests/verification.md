@@ -1,6 +1,6 @@
 # Verification record — 2026-10-29
 
-Status: local bug fixes and runtime verification completed on macOS arm64 / Python 3.12.13. Not deployed or verified against real mailboxes. GitHub Actions and its Python 3.13 job were not run.
+Status: local bug fixes, GitHub Actions and VPS deployment verified on 2026-10-29. Local runtime: macOS arm64 / Python 3.12.13. Production image: Linux amd64 / Python 3.13. Not verified against real mailboxes.
 
 ## Source and fixes
 
@@ -23,7 +23,10 @@ The current chat workspace was empty. Source was copied from the same-named Goog
 | `.venv/bin/python -m pip check` | No broken requirements |
 | `PLAYWRIGHT_BROWSERS_PATH=/tmp/mailharbor-playwright .venv/bin/python tests/live_smoke.py` | Passed with real local HTTP, stdio MCP and Chromium |
 | `docker compose --env-file .env.example config --no-interpolate --no-env-resolution --quiet` | Passed |
-| Docker image build/start | Not run: Docker daemon unavailable |
+| Docker image build/start | Passed on VPS; app healthy, non-root, localhost-only 8080 |
+| Production Docker image unit suite | 94 passed; zero skips |
+| GitHub Actions Python 3.12 / 3.13 and browser/MCP | All three jobs passed for application commit `66113b7` |
+| Public HTTPS / admin session / database / REST + MCP / token revocation | Passed at `https://mailharbor.feizhang233.com` |
 
 The browser smoke covers incorrect-password feedback, login, synthetic-mail search/read and HTML injection protection, settings persistence and secret clearing, logout blocked during pending save, diagnostics, token creation/revocation, a 390-pixel mobile viewport without horizontal overflow, logout, and JavaScript error collection. The stdio bridge initializes through the actual MCP SDK, lists the four expected read-only tools, searches mail and reads a result over real local HTTP.
 
@@ -31,11 +34,11 @@ All mail, passwords, tokens and provider responses used for verification were sy
 
 Tested main packages: FastAPI 0.162.0, Starlette 1.10.0, MCP 1.30.0, HTTPX 0.28.1, cryptography 46.0.7, Playwright 1.64.1. The installed Starlette emits a TestClient deprecation notice for HTTPX; this did not affect test results.
 
-## Remaining deployment acceptance
+## Remaining provider/client acceptance
 
-- Build/start the containers and check the production HTTPS origin, reverse proxy and health check.
+The app and dedicated Cloudflare Tunnel have been deployed; the container and tunnel restart automatically. See `../docs/deployment.md` for the exact runtime layout and checks.
 - Complete actual Google/Microsoft OAuth or IMAP authorization and test refresh, synchronization scope and disconnect behavior for each provider in use.
 - Verify external Codex/client connectivity, explicit OAuth consent and grant revocation in the intended client, and preservation of provider read/unread flags.
-- Run GitHub Actions, including Python 3.13, if publishing the project.
+GitHub Actions evidence: https://github.com/feizhang233/MailHarbor/actions/runs/40962534626 . The deployment verification token was revoked and removed after checks; no lasting AI token or application grant was left behind.
 
 Frontend evidence and its limits are recorded in `ui-verification.md`.

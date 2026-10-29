@@ -4,7 +4,7 @@
 
 v0.2 增加可直接操作的設定頁、首次設定清單、本機狀態診斷、OAuth 登入授權與應用撤銷、Claude Desktop stdio 橋接，以及唯讀 REST/OpenAPI。郵箱供應商設定加密保存於資料庫，修改後套用到下一次同步。
 
-**這是待部署與真實郵箱驗證的來源碼；未替你建立 Google／Microsoft OAuth 應用、登入郵箱、部署 VPS 或安裝外掛。** 2026-10-29 已在本機 Python 3.12 執行 94 項測試，全數通過、零跳過，並通過使用合成郵件的真實 HTTP、stdio MCP 與 Chromium 操作驗證；修復與範圍見 [測試紀錄](tests/verification.md)。專案另附 GitHub Actions：Python 3.12／3.13 完整測試禁止跳過；GitHub Actions、Docker 容器執行和真實郵箱驗證尚未完成。
+**已部署：<https://mailharbor.feizhang233.com>。** 程式存放於私人 [GitHub 倉庫](https://github.com/feizhang233/MailHarbor)。2026-10-29 本機及 VPS 部署映像的 94 項測試皆通過、零跳過；GitHub Actions 的 Python 3.12／3.13 與瀏覽器／stdio MCP 測試也全部通過。正式 HTTPS 的登入、資料庫、唯讀 REST／MCP 與金鑰撤銷已驗證；**尚未連接真實郵箱或建立 Google／Microsoft OAuth 應用**。詳見 [測試紀錄](tests/verification.md) 及 [部署紀錄](docs/deployment.md)。
 
 ## 管理頁現在可以做什麼
 
