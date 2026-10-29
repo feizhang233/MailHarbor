@@ -1,6 +1,6 @@
 # Verification record — 2026-10-29
 
-Status: local bug fixes and runtime verification completed on macOS arm64 / Python 3.12.13. Not deployed or verified against real mailboxes. GitHub Actions and its Python 3.13 job were not run.
+The release was tested with synthetic mail and mocked provider responses. Real-mailbox acceptance is a separate check.
 
 ## Source and fixes
 
@@ -21,19 +21,20 @@ Status: local bug fixes and runtime verification completed on macOS arm64 / Pyth
 | `.venv/bin/python -m pip check` | No broken requirements |
 | `PLAYWRIGHT_BROWSERS_PATH=/tmp/mailharbor-playwright .venv/bin/python tests/live_smoke.py` | Passed with real local HTTP, stdio MCP and Chromium |
 | `docker compose --env-file .env.example config --no-interpolate --no-env-resolution --quiet` | Passed |
-| Docker image build/start | Not run: Docker daemon unavailable |
+| Docker image build/start | Passed |
+| Unit suite in the release image | 94 passed, zero skips |
+| GitHub Actions Python 3.12 / 3.13 and browser/MCP | All three jobs passed |
+| HTTPS / admin session / database / REST + MCP / token revocation | Passed in deployment verification |
 
 The browser smoke covers incorrect-password feedback, login, synthetic-mail search/read and HTML injection protection, settings persistence and secret clearing, logout blocked during pending save, diagnostics, token creation/revocation, a 390-pixel mobile viewport without horizontal overflow, logout, and JavaScript error collection. The stdio bridge initializes through the actual MCP SDK, lists the four expected read-only tools, searches mail and reads a result over real local HTTP.
 
-All mail, passwords, tokens and provider responses used for verification were synthetic. Provider network behavior is tested with mocks; no real mailbox account or live OAuth provider was contacted. Local tests required permission to download dependencies and start a loopback listener; those checks completed successfully.
+The test suite uses synthetic mail, passwords, tokens and provider responses. Provider network behavior is tested with mocks.
 
 Tested main packages: FastAPI 0.162.0, Starlette 1.10.0, MCP 1.30.0, HTTPX 0.28.1, cryptography 46.0.7, Playwright 1.64.1. The installed Starlette emits a TestClient deprecation notice for HTTPX; this did not affect test results.
 
-## Remaining deployment acceptance
+## Remaining provider/client acceptance
 
-- Build/start the containers and check the production HTTPS origin, reverse proxy and health check.
 - Complete actual Google/Microsoft OAuth or IMAP authorization and test refresh, synchronization scope and disconnect behavior for each provider in use.
 - Verify external Codex/client connectivity, explicit OAuth consent and grant revocation in the intended client, and preservation of provider read/unread flags.
-- Run GitHub Actions, including Python 3.13, if publishing the project.
 
 Frontend evidence and its limits are recorded in `ui-verification.md`.

@@ -4,7 +4,7 @@
 
 v0.2 增加可直接操作的設定頁、首次設定清單、本機狀態診斷、OAuth 登入授權與應用撤銷、Claude Desktop stdio 橋接，以及唯讀 REST/OpenAPI。郵箱供應商設定加密保存於資料庫，修改後套用到下一次同步。
 
-**這是待部署與真實郵箱驗證的來源碼；未替你建立 Google／Microsoft OAuth 應用、登入郵箱、部署 VPS 或安裝外掛。** 2026-10-29 已在本機 Python 3.12 執行 94 項測試，全數通過、零跳過，並通過使用合成郵件的真實 HTTP、stdio MCP 與 Chromium 操作驗證；修復與範圍見 [測試紀錄](tests/verification.md)。專案另附 GitHub Actions：Python 3.12／3.13 完整測試禁止跳過；GitHub Actions、Docker 容器執行和真實郵箱驗證尚未完成。
+在自己的伺服器上安裝，請參閱[部署指南](docs/deployment.md)。[測試紀錄](tests/verification.md)涵蓋以合成郵件執行的 HTTP、stdio MCP 與瀏覽器測試。實際郵箱的授權與同步需在自己的環境驗證。
 
 ## 管理頁現在可以做什麼
 
