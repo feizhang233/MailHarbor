@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "mailharbor": {
+      "url": "https://mail.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${env:MAILHUB_MCP_TOKEN}"
+      }
+    }
+  }
+}

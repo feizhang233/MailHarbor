@@ -1,0 +1,15 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "mailharbor",
+  "version": "0.2.0",
+  "description": "Read and search mail from your connected accounts through your private MailHarbor service.",
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "MailHarbor",
+        "shortDescription": "多郵箱搜尋與唯讀郵件存取",
+        "longDescription": "透過私人 MailHarbor 中轉站搜尋已同步郵件、閱讀郵件與查看各帳號同步狀態。工具不發信、不刪信、不變更已讀狀態。"
+      }
+    }
+  }
+}

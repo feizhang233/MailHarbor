@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="referrer" content="no-referrer">
+  <title>MailHarbor · 郵件中轉站</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/tokens.css">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要內容</a>
+  <div id="boot" class="boot" role="status"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span>正在開啟 MailHarbor…</span></div>
+  <section id="login-view" class="login-view" hidden aria-labelledby="login-title">
+    <div class="login-intro">
+      <div class="wordmark"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>MailHarbor</div>
+      <p class="eyebrow">你的私人郵件中轉站</p>
+      <h1 id="login-title">各個郵箱，<br>在這裡匯合。</h1>
+      <p>把分散的郵件集中閱讀，讓 Codex 透過一個入口搜尋。每個帳號保留各自的來源與同步狀態。</p>
+      <div class="login-principle"><span aria-hidden="true">↗</span><span>唯讀存取<br><small>不寄信、不刪信、不改變已讀狀態</small></span></div>
+    </div>
+    <div class="login-card">
+      <h2>開啟工作台</h2><p class="muted">使用部署時設定的管理密碼登入。</p>
+      <form id="login-form" novalidate>
+        <div class="field"><label for="login-password">管理密碼</label><div class="secret-wrap"><input id="login-password" name="password" type="password" autocomplete="current-password" required aria-describedby="login-password-error"><button type="button" class="reveal" data-reveal="login-password" aria-label="顯示管理密碼" aria-pressed="false" data-js-control disabled>顯示</button></div><span class="field-error" id="login-password-error"></span></div>
+        <p id="login-error" class="error-line" role="alert"></p>
+        <button class="button primary full" type="submit">登入工作台</button>
+      </form>
+      <p class="small muted">只有管理者能連接郵箱與建立 AI 存取金鑰。</p>
+    </div>
+  </section>
+  <div id="app-view" class="app-shell" hidden>
+    <aside class="sidebar">
+      <a class="wordmark" href="#inbox"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>MailHarbor</a>
+      <p class="rail-caption">私人郵件中轉站</p>
+      <nav class="main-nav" aria-label="主要導覽">
+        <a href="#inbox" data-page="inbox"><span aria-hidden="true">▤</span>統一收件匣<span id="inbox-count" class="nav-count">0</span></a>
+        <a href="#accounts" data-page="accounts"><span aria-hidden="true">◫</span>我的郵箱<span id="account-count" class="nav-count">0</span></a>
+        <a href="#connect" data-page="connect"><span aria-hidden="true">⌁</span>連接 AI</a>
+        <a href="#settings" data-page="settings"><span aria-hidden="true">⚙</span>設定</a>
+      </nav>
+      <div class="rail-footer"><span class="rail-label">READ ONLY</span><p>郵件留在原處。<br>多個來源，一個入口。</p><button type="button" id="logout" class="rail-button" data-js-control disabled>登出</button></div>
+    </aside>
+    <main id="main" class="main" tabindex="-1">
+      <div id="network-banner" class="banner warning" role="status" hidden></div>
+      <div id="callback-banner" class="banner" role="status" hidden></div>
+      <div id="pending-consent" class="banner consent-pending" hidden><span>有一個 AI 應用程式正在要求讀取郵件。</span><button id="review-consent" type="button" class="button outline small" data-js-control disabled>查看授權要求</button></div>
+      <section id="page-inbox" class="page" aria-labelledby="inbox-title">
+        <header class="page-header"><div><p class="eyebrow">MAIL WORKSPACE</p><h1 id="inbox-title">統一收件匣</h1><p class="muted">跨郵箱搜尋，保留每封郵件的來源。</p></div><button type="button" class="button primary" data-open-account data-js-control disabled>＋ 連接郵箱</button></header>
+        <section id="setup-panel" class="panel setup-panel" aria-labelledby="setup-title" hidden><div class="section-heading"><div><h2 id="setup-title">完成你的郵件中轉站</h2><p class="small muted">依序設定、連接郵箱，再讓 AI 讀取。</p></div><span id="setup-progress" class="tag neutral"></span></div><div id="setup-steps" class="setup-steps" aria-live="polite"></div><div class="button-row setup-actions"><a href="#settings" class="button outline small">設定同步與授權</a><button type="button" class="button primary small" data-open-account data-js-control disabled>連接郵箱</button><a href="#connect" class="button ghost small">連接 AI →</a></div></section>
+        <div class="scope-strip"><span class="scope-icon" aria-hidden="true">↻</span><div><strong id="coverage">正在取得同步範圍</strong><p id="sync-summary">讀取已同步快取，不會更改郵件狀態。</p></div><span class="tag">唯讀</span></div>
+        <div class="mail-panel panel">
+          <div class="mail-toolbar">
+            <form id="search-form" class="search-form" role="search" novalidate><label for="mail-search" class="sr-only">搜尋郵件</label><span class="search-symbol" aria-hidden="true">⌕</span><input id="mail-search" type="search" placeholder="搜尋主旨、寄件者或內文" autocomplete="off" maxlength="300"><button id="clear-search" type="button" class="clear-search" aria-label="清除搜尋" hidden data-js-control disabled>×</button></form>
+            <div class="filter-field"><label for="account-filter" class="sr-only">郵箱篩選</label><select id="account-filter"><option value="">所有郵箱</option></select></div>
+            <button id="refresh-messages" type="button" class="button outline" data-js-control disabled>重新整理</button>
+          </div>
+          <div class="list-heading" aria-hidden="true"><span>寄件者</span><span>郵件</span><span>時間</span></div>
+          <div id="mail-list" class="mail-list" aria-live="polite" aria-busy="false"></div>
+          <footer class="pagination"><span id="page-range" class="muted">尚未載入</span><div><button id="prev-page" type="button" class="button ghost" disabled>← 上一頁</button><button id="next-page" type="button" class="button ghost" disabled>下一頁 →</button></div></footer>
+        </div>
+        <p class="footnote">顯示時間：Europe/Belgrade。搜尋僅涵蓋同步範圍；附件僅列出資料，不提供附件內容。</p>
+      </section>
+      <section id="page-accounts" class="page" hidden aria-labelledby="accounts-title">
+        <header class="page-header"><div><p class="eyebrow">CONNECTED ACCOUNTS</p><h1 id="accounts-title">我的郵箱</h1><p class="muted">同一服務可以連接多個帳號，分別授權與同步。</p></div><button type="button" class="button primary" data-open-account data-js-control disabled>＋ 連接郵箱</button></header>
+        <div id="accounts-list" class="account-grid" aria-live="polite"></div>
+        <div class="support-note panel"><h2>不同郵箱，各自連接</h2><p>Google 和 Microsoft 使用登入授權；iCloud、QQ、網易等使用 IMAP 與專用密碼／授權碼。企業郵箱可填寫自訂 IMAP 伺服器。</p><p class="muted">Proton Mail 需要額外的 Bridge 環境；Tuta 不提供一般 IMAP。第一版不會把這些服務顯示為可直接連接。</p></div>
+      </section>
+      <section id="page-connect" class="page" hidden aria-labelledby="connect-title">
+        <header class="page-header"><div><p class="eyebrow">AI ACCESS</p><h1 id="connect-title">讓 AI 讀取郵件</h1><p class="muted">選擇你使用的工具，建立一個跨郵箱的唯讀入口。</p></div><span class="tag">MCP · REST</span></header>
+        <div class="connect-layout">
+          <section class="panel connection-card"><div class="section-heading"><h2>連線設定</h2><span id="transport-label" class="tag">Streamable HTTP</span></div><div class="form-grid"><div class="field"><label for="ai-client">AI 工具</label><select id="ai-client"><option value="codex">Codex</option><option value="cursor">Cursor</option><option value="claude">Claude Desktop（本機橋接）</option><option value="rest">其他工具 · REST / OpenAPI</option><option value="oauth">其他遠端 MCP · OAuth</option></select></div><div class="field"><label for="ai-auth">授權方式</label><select id="ai-auth"><option value="oauth">登入並授權（OAuth）</option><option value="token">存取金鑰</option></select></div></div><label id="endpoint-label" class="field-label" for="endpoint">MCP 伺服器位址</label><div class="copy-row"><input id="endpoint" readonly class="mono"><button id="copy-endpoint" type="button" class="button outline" data-js-control disabled>複製</button></div><p id="client-instructions" class="small muted"></p><div class="section-heading"><h3 id="config-title">Codex 設定範例</h3><button id="copy-config" type="button" class="button ghost small" data-js-control disabled>複製設定</button></div><pre id="codex-config" tabindex="0" aria-label="AI 連線設定範例"></pre><p id="config-note" class="small muted"></p><a id="openapi-link" class="small" target="_blank" rel="noopener noreferrer" hidden>查看唯讀 OpenAPI 定義 ↗</a><div class="tool-list"><span>列出郵箱</span><span>搜尋郵件</span><span>閱讀內文</span><span>查看同步狀態</span></div></section>
+          <section class="panel token-card"><h2>存取金鑰</h2><p class="muted">每個裝置可使用不同金鑰，方便單獨撤銷。</p><form id="token-form" novalidate><div class="field"><label for="token-name">金鑰名稱</label><input id="token-name" name="name" placeholder="例如：Mac 上的 Codex" maxlength="80" autocomplete="off" required aria-describedby="token-name-error"><span id="token-name-error" class="field-error"></span></div><p id="token-error" class="error-line" role="alert"></p><button type="submit" class="button primary">建立存取金鑰</button></form><div id="tokens-list" class="tokens-list" aria-live="polite"></div></section>
+        </div>
+        <section class="panel grants-card" aria-labelledby="grants-title"><div class="section-heading"><div><h2 id="grants-title">已授權的應用程式</h2><p class="small muted">透過 OAuth 登入的 AI 應用。撤銷後，其存取與更新憑證會一併失效。</p></div><button id="refresh-grants" type="button" class="button outline small" data-js-control disabled>重新整理</button></div><div id="grants-list" aria-live="polite"></div></section>
+        <div class="support-note"><h2>讀取與分析分開進行</h2><p>中轉站負責連接和同步郵件，Codex 負責理解與整理。這個服務本身不需要 OpenAI API 金鑰，也不會自行把全部郵件送去分析。</p></div>
+      </section>
+      <section id="page-settings" class="page" hidden aria-labelledby="settings-title">
+        <header class="page-header"><div><p class="eyebrow">WORKSPACE SETTINGS</p><h1 id="settings-title">設定</h1><p class="muted">調整同步範圍，在這裡完成 Google 和 Microsoft 的登入授權設定。</p></div><span class="tag">管理者</span></header>
+        <div id="settings-status" class="banner" role="status">正在載入設定…</div>
+        <button id="retry-settings" type="button" class="button outline" data-js-control disabled hidden>重新載入設定</button>
+        <form id="settings-form" novalidate>
+          <fieldset id="settings-fields" disabled>
+            <section class="panel settings-card"><div class="section-heading"><div><h2>郵件同步</h2><p class="small muted">設定會套用到下一次同步。已儲存的快取會在各郵箱下次成功同步時更新。</p></div></div><div class="settings-numbers"><div class="field"><label for="sync-interval">同步間隔（秒）</label><input id="sync-interval" type="number" min="30" max="86400" step="1" required aria-describedby="sync-interval-help sync-interval-error"><small id="sync-interval-help" class="muted">30–86400 秒；300 秒即 5 分鐘。</small><span id="sync-interval-error" class="field-error"></span></div><div class="field"><label for="sync-days">同步最近幾天</label><input id="sync-days" type="number" min="1" max="365" step="1" required aria-describedby="sync-days-help sync-days-error"><small id="sync-days-help" class="muted">1–365 天。</small><span id="sync-days-error" class="field-error"></span></div><div class="field"><label for="sync-limit">每個郵箱最多封數</label><input id="sync-limit" type="number" min="1" max="1000" step="1" required aria-describedby="sync-limit-help sync-limit-error"><small id="sync-limit-help" class="muted">1–1000 封，仍受天數範圍限制。</small><span id="sync-limit-error" class="field-error"></span></div></div></section>
+            <div class="provider-settings-grid">
+              <section class="panel settings-card"><div class="section-heading"><h2>Google / Gmail</h2><span id="google-configured" class="tag neutral">尚未載入</span></div><p class="small muted">在 Google Cloud 建立「網頁應用程式」OAuth 用戶端，加入下方回呼網址。設定完成後，到「我的郵箱」登入每一個 Google 帳號。</p><div class="field"><label for="google-client-id">Client ID</label><input id="google-client-id" autocomplete="off" spellcheck="false" maxlength="1024" aria-describedby="google-client-id-error"><span id="google-client-id-error" class="field-error"></span></div><div class="field"><label for="google-client-secret">Client Secret</label><div class="secret-wrap"><input id="google-client-secret" type="password" autocomplete="new-password" maxlength="4096" aria-describedby="google-secret-help google-client-secret-error"><button type="button" class="reveal" data-reveal="google-client-secret" aria-label="顯示 Google Client Secret" aria-pressed="false" data-js-control disabled>顯示</button></div><small id="google-secret-help" class="muted">留空保留原值，不會讀回。更改 Client ID 時，需一併更新或明確清除 Secret。</small><span id="google-client-secret-error" class="field-error"></span></div><label class="checkbox-field" for="clear-google-secret"><input id="clear-google-secret" type="checkbox">清除已儲存的 Google Client Secret</label><label for="google-redirect" class="field-label">已授權的重新導向 URI</label><div class="copy-row"><input id="google-redirect" class="mono" readonly><button id="copy-google-redirect" type="button" class="button outline small" data-js-control disabled>複製</button></div><p class="small muted">Google 的測試模式可能讓郵件授權短期到期；長期使用請依官方要求設定發布狀態。</p><a href="https://developers.google.com/identity/protocols/oauth2/web-server" target="_blank" rel="noopener noreferrer" class="small">Google 官方設定說明 ↗</a></section>
+              <section class="panel settings-card"><div class="section-heading"><h2>Microsoft / Outlook</h2><span id="microsoft-configured" class="tag neutral">尚未載入</span></div><p class="small muted">在 Microsoft Entra 註冊應用程式，使用 Web 回呼網址。若需連接個人與企業帳號，請確認應用程式的帳號類型支援兩者。</p><div class="field"><label for="microsoft-client-id">Application (client) ID</label><input id="microsoft-client-id" autocomplete="off" spellcheck="false" maxlength="1024" aria-describedby="microsoft-client-id-error"><span id="microsoft-client-id-error" class="field-error"></span></div><div class="field"><label for="microsoft-client-secret">Client Secret 的 Value</label><div class="secret-wrap"><input id="microsoft-client-secret" type="password" autocomplete="new-password" maxlength="4096" aria-describedby="microsoft-secret-help microsoft-client-secret-error"><button type="button" class="reveal" data-reveal="microsoft-client-secret" aria-label="顯示 Microsoft Client Secret" aria-pressed="false" data-js-control disabled>顯示</button></div><small id="microsoft-secret-help" class="muted">填入 secret 的 Value。留空保留原值；變更 Client ID 時需一併更新或清除 Secret。</small><span id="microsoft-client-secret-error" class="field-error"></span></div><label class="checkbox-field" for="clear-microsoft-secret"><input id="clear-microsoft-secret" type="checkbox">清除已儲存的 Microsoft Client Secret</label><label for="microsoft-redirect" class="field-label">Web 重新導向 URI</label><div class="copy-row"><input id="microsoft-redirect" class="mono" readonly><button id="copy-microsoft-redirect" type="button" class="button outline small" data-js-control disabled>複製</button></div><a href="https://learn.microsoft.com/entra/identity-platform/quickstart-register-app" target="_blank" rel="noopener noreferrer" class="small">Microsoft 官方設定說明 ↗</a></section>
+            </div>
+            <div class="settings-save"><div><p id="settings-error" class="error-line" role="alert"></p><p id="settings-dirty" class="small muted">尚未變更設定。</p></div><div class="button-row"><button id="discard-settings" type="button" class="button outline" data-js-control disabled>重新載入</button><button id="save-settings" type="submit" class="button primary">儲存設定</button></div></div>
+          </fieldset>
+        </form>
+        <section class="panel settings-card"><div class="section-heading"><div><h2>服務狀態</h2><p class="small muted">檢查設定與資料庫是否可用；不代表外部 HTTPS 或真實郵箱已驗證。</p></div><button id="run-diagnostics" type="button" class="button outline" data-js-control disabled>執行檢查</button></div><label for="public-origin" class="field-label">對外網址</label><input id="public-origin" class="mono" readonly><p class="small muted origin-help">如需變更網域，請調整 VPS 部署與反向代理設定。</p><div id="diagnostics-results" aria-live="polite"><p class="small muted">尚未執行檢查。</p></div></section>
+      </section>
+    </main>
+  </div>
+  <dialog id="account-dialog" aria-labelledby="account-dialog-title" class="account-dialog">
+    <div class="dialog-header"><div><p class="eyebrow">ADD A MAILBOX</p><h2 id="account-dialog-title">連接郵箱</h2></div><button type="button" class="icon-button" id="close-account" aria-label="關閉連接郵箱" data-js-control disabled>×</button></div>
+    <div class="dialog-body"><div class="field"><label for="provider-select">郵箱服務</label><select id="provider-select"></select></div><p id="provider-note" class="provider-note"></p><a id="provider-guide" class="small" target="_blank" rel="noopener noreferrer" hidden>查看服務商設定說明 ↗</a>
+      <div id="oauth-pane" hidden><div id="oauth-state" class="banner"></div><p id="oauth-error" class="error-line" role="alert"></p><button id="open-oauth-settings" type="button" class="button outline full" data-js-control disabled hidden>前往設定，填入授權資料</button><button id="start-oauth" type="button" class="button primary full" data-js-control disabled>登入並授權</button></div>
+      <div id="unsupported-pane" class="banner warning" hidden>此服務目前無法直接連接。</div>
+      <form id="account-form" novalidate hidden>
+        <div class="form-grid"><div class="field"><label for="account-email">郵箱地址</label><input id="account-email" name="email" type="email" autocomplete="email" required maxlength="254" aria-describedby="account-email-error"><span id="account-email-error" class="field-error"></span></div><div class="field"><label for="account-label">顯示名稱 <span class="optional">選填</span></label><input id="account-label" name="label" maxlength="80" placeholder="例如：工作郵箱" aria-describedby="account-label-error"><span id="account-label-error" class="field-error"></span></div></div>
+        <div class="field"><label for="account-password">應用程式密碼／授權碼</label><div class="secret-wrap"><input id="account-password" name="password" type="password" autocomplete="off" required aria-describedby="account-password-help account-password-error"><button type="button" class="reveal" data-reveal="account-password" aria-label="顯示郵箱授權碼" aria-pressed="false" data-js-control disabled>顯示</button></div><small id="account-password-help" class="muted">請先在郵箱設定開啟 IMAP，並產生專用密碼或授權碼。</small><span id="account-password-error" class="field-error"></span></div>
+        <details id="advanced-settings"><summary>伺服器與進階設定</summary><div class="form-grid"><div class="field"><label for="account-host">IMAP 伺服器</label><input id="account-host" name="host" autocomplete="off" spellcheck="false" required aria-describedby="account-host-error"><span id="account-host-error" class="field-error"></span></div><div class="field"><label for="account-port">TLS 連接埠</label><input id="account-port" name="port" type="number" min="993" max="993" value="993" required readonly aria-describedby="account-port-error"><span id="account-port-error" class="field-error"></span></div><div class="field"><label for="account-username">登入使用者名稱 <span class="optional">選填</span></label><input id="account-username" name="username" autocomplete="username" placeholder="預設使用郵箱地址" aria-describedby="account-username-error"><span id="account-username-error" class="field-error"></span></div><div class="field"><label for="account-folder">同步資料夾</label><input id="account-folder" name="folder" value="INBOX" maxlength="200" required aria-describedby="account-folder-error"><span id="account-folder-error" class="field-error"></span></div></div></details>
+        <p id="account-error" class="error-line" role="alert"></p><div class="dialog-actions"><button type="button" class="button outline" id="cancel-account" data-js-control disabled>取消</button><button type="submit" class="button primary">驗證並連接</button></div>
+      </form>
+      <div id="discard-account" class="banner warning" hidden><p>尚未儲存的郵箱設定將會清除。</p><div class="button-row"><button id="keep-account" type="button" class="button outline" data-js-control disabled>繼續編輯</button><button id="discard-account-confirm" type="button" class="button danger" data-js-control disabled>捨棄設定</button></div></div>
+    </div>
+  </dialog>
+  <dialog id="reader-dialog" class="reader-dialog" aria-labelledby="reader-title"><div class="dialog-header"><span class="tag">郵件快取 · 唯讀</span><button id="close-reader" type="button" class="icon-button" aria-label="關閉郵件" data-js-control disabled>×</button></div><div id="reader-content" class="dialog-body"><h2 id="reader-title">讀取郵件</h2></div></dialog>
+  <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-description"><div class="dialog-body"><h2 id="confirm-title"></h2><p id="confirm-description"></p><p id="confirm-error" class="error-line" role="alert"></p><div class="dialog-actions"><button id="confirm-cancel" type="button" class="button outline" data-js-control disabled>取消</button><button id="confirm-action" type="button" class="button danger" data-js-control disabled></button></div></div></dialog>
+  <dialog id="secret-dialog" class="secret-dialog" aria-labelledby="secret-title"><div class="dialog-header"><h2 id="secret-title">請保存這次產生的金鑰</h2><button id="close-secret" type="button" class="icon-button" aria-label="關閉並清除顯示的金鑰" data-js-control disabled>×</button></div><div class="dialog-body"><p>金鑰只會顯示這一次。關閉後，你可以撤銷並建立新的金鑰。</p><label for="new-token" class="field-label">存取金鑰</label><div class="secret-wrap"><input id="new-token" readonly type="password" autocomplete="off" class="mono"><button type="button" class="reveal" data-reveal="new-token" aria-label="顯示存取金鑰" aria-pressed="false" data-js-control disabled>顯示</button></div><p id="copy-token-status" class="error-line" role="status"></p><div class="dialog-actions"><button id="copy-token" type="button" class="button primary" data-js-control disabled>複製金鑰</button><button id="saved-token" type="button" class="button outline" data-js-control disabled>已保存，關閉</button></div></div></dialog>
+  <dialog id="consent-dialog" class="consent-dialog" aria-labelledby="consent-title"><div class="dialog-header"><div><p class="eyebrow">APPLICATION ACCESS</p><h2 id="consent-title">允許此應用程式讀取郵件？</h2></div></div><div class="dialog-body"><p class="small muted">確認以下來源是你剛剛連接的 AI 工具。應用程式名稱由對方自行提供，未經本服務驗證。</p><dl id="consent-details" class="reader-meta consent-details"></dl><div class="banner warning">授權後，此應用程式可列出、搜尋及閱讀<strong>所有已連接郵箱</strong>的郵件快取，包括之後新增的郵箱。不能寄信、刪信或修改郵件。</div><p id="consent-expiry" class="small muted"></p><p id="consent-error" class="error-line" role="alert"></p><div class="dialog-actions"><button id="consent-later" type="button" class="button ghost" data-js-control disabled>稍後處理</button><button id="consent-deny" type="button" class="button outline" data-js-control disabled>拒絕</button><button id="consent-approve" type="button" class="button primary" data-js-control disabled>允許唯讀存取</button></div></div></dialog>
+  <div id="live-status" class="live-status" role="status" aria-live="polite"></div>
+  <noscript><p class="banner">此工作台需要啟用 JavaScript 才能連接與讀取郵箱。</p></noscript>
+</body>
+</html>

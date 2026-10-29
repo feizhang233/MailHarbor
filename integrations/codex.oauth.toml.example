@@ -1,0 +1,7 @@
+# OAuth connection: merge into the active Codex config, then run:
+# codex mcp login mailharbor
+[mcp_servers.mailharbor]
+url = "https://mail.example.com/mcp"
+startup_timeout_sec = 20
+tool_timeout_sec = 45
+enabled_tools = ["list_accounts", "search_emails", "read_email", "get_sync_status"]
