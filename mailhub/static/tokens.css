@@ -1,0 +1,42 @@
+/* Generated from DESIGN.md; run scripts/generate_ui_tokens.py. */
+:root {
+  --color-primary: #11695E;
+  --color-primary-hover: #0B5148;
+  --color-primary-soft: #E4F1ED;
+  --color-ink: #172F3C;
+  --color-muted: #506773;
+  --color-background: #F0F4F6;
+  --color-surface: #FFFFFF;
+  --color-line: #CAD6DD;
+  --color-line-soft: #E4EBEF;
+  --color-rail: #183B4A;
+  --color-rail-ink: #E9F2F5;
+  --color-rail-muted: #B5CAD3;
+  --color-danger: #AB3441;
+  --color-danger-soft: #FFF0F1;
+  --color-warning: #825216;
+  --color-warning-soft: #FFF5E3;
+  --color-focus: #176BA0;
+  --color-scrollbar-thumb: #8CA2AC;
+  --color-scrollbar-track: #E4EBEF;
+  --color-scrollbar-hover: #687F8B;
+  --color-scrollbar-active: #506773;
+  --radius-control: 0.5rem;
+  --radius-panel: 0.875rem;
+  --radius-badge: 2rem;
+  --space-xs: 0.375rem;
+  --space-sm: 0.75rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2rem;
+  --space-page-max: 88rem;
+  --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang TC', 'Microsoft JhengHei', sans-serif;
+  --text-body: 0.9375rem;
+  --leading-body: 1.65;
+  --font-display: 'Avenir Next', 'Segoe UI', 'PingFang TC', sans-serif;
+  --text-display: 1.75rem;
+  --leading-display: 1.25;
+  --font-mono: 'SFMono-Regular', Consolas, monospace;
+  --text-mono: 0.8125rem;
+  --leading-mono: 1.6;
+}

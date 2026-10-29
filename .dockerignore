@@ -1,0 +1,9 @@
+*
+!requirements.txt
+!mailhub/
+!mailhub/**
+mailhub/**/__pycache__/
+mailhub/**/*.pyc
+mailhub/**/*.sqlite*
+mailhub/**/*.db*
+mailhub/**/.env*

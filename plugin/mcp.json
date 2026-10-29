@@ -1,0 +1,19 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "mailharbor": {
+      "type": "streamable-http",
+      "url": "https://mail.example.com/mcp",
+      "extensions": {
+        "com.openai": {
+          "auth": {
+            "type": "oauth",
+            "client": {"mode": "dcr"},
+            "resource": "https://mail.example.com/mcp",
+            "baseScopes": ["mail.read"]
+          }
+        }
+      }
+    }
+  }
+}

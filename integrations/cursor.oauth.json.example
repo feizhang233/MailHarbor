@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "mailharbor": {
+      "url": "https://mail.example.com/mcp"
+    }
+  }
+}

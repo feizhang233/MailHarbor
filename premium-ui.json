@@ -1,0 +1,34 @@
+{
+  "profile": "product-admin",
+  "sourceRoots": [
+    "mailhub/static"
+  ],
+  "locale": "zh-TW",
+  "canonicalMap": "UX-CONTRACT.md",
+  "requiredCapabilities": [
+    "Select/Listbox",
+    "Form",
+    "Scrollbar",
+    "Toast",
+    "CRUD"
+  ],
+  "ownership": {
+    "Select/Listbox": "native"
+  },
+  "requiredCommands": [
+    "syntax",
+    "ui-contract",
+    "tokens",
+    "ui-logic"
+  ],
+  "commands": {
+    "syntax": "node --check mailhub/static/app.js",
+    "ui-contract": "python3 scripts/check_ui.py",
+    "tokens": "python3 scripts/generate_ui_tokens.py --check",
+    "ui-logic": "node tests/ui_logic.cjs"
+  },
+  "evidence": {
+    "crudFullFlow": "tests/ui-verification.md",
+    "failurePaths": "tests/ui-verification.md"
+  }
+}

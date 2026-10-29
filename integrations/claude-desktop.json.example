@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "mailharbor": {
+      "command": "/absolute/path/to/MailHarbor/.venv/bin/python",
+      "args": [
+        "/absolute/path/to/MailHarbor/scripts/stdio_bridge.py",
+        "--url",
+        "https://mail.example.com/mcp"
+      ],
+      "env": {
+        "MAILHUB_MCP_TOKEN": "REPLACE_IN_PRIVATE_LOCAL_CONFIG_ONLY"
+      }
+    }
+  }
+}

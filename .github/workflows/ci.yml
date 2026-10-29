@@ -1,0 +1,56 @@
+name: MailHarbor checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install application dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Complete Python tests (skips are failures)
+        run: python scripts/ci_tests.py
+      - name: Frontend syntax, contracts and logic
+        run: |
+          node --check mailhub/static/app.js
+          python scripts/check_ui.py
+          python scripts/generate_ui_tokens.py --check
+          node tests/ui_logic.cjs
+      - name: Deployment and source package checks
+        run: |
+          docker compose --env-file .env.example config --no-interpolate --no-env-resolution --quiet
+          python scripts/package.py
+
+  browser-and-mcp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install application and browser dependencies
+        run: |
+          python -m pip install -r requirements.txt 'playwright>=1.49,<2'
+          python -m playwright install --with-deps chromium
+      - name: Real app + stdio MCP + browser smoke with synthetic mail
+        run: python tests/live_smoke.py

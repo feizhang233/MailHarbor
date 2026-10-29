@@ -1,0 +1,8 @@
+# Add this table to the Codex config used by your client.
+# Replace the hostname; do not put an actual credential in this file.
+[mcp_servers.mailharbor]
+url = "https://mail.example.com/mcp"
+bearer_token_env_var = "MAILHUB_MCP_TOKEN"
+startup_timeout_sec = 20
+tool_timeout_sec = 45
+enabled_tools = ["list_accounts", "search_emails", "read_email", "get_sync_status"]
