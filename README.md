@@ -8,8 +8,8 @@ v0.2 增加可直接操作的設定頁、首次設定清單、本機狀態診斷
 
 ## 管理頁現在可以做什麼
 
-- 「設定」調整同步間隔、天數及每帳號封數，填 Google／Microsoft Client ID 和 Secret；密碼欄留空保留原值，已儲存的 Secret 不會讀回，清除需明確選取。
-- 「我的郵箱」逐一連接 Gmail、Microsoft 或 IMAP 帳號，查看錯誤及最後同步時間。
+- 「設定」按郵件同步、郵箱授權、介面語言、MCP 使用指南及服務狀態分類。登入頁與設定頁可選繁體中文、簡體中文、英文、法文、德文、日文及塞爾維亞文（拉丁字母），瀏覽器會記住選擇。
+- 「我的郵箱 → 連接郵箱」選 Gmail 或 Outlook，會直接開啟該服務的授權設定。首次填好應用程式憑證後，可多次按登入按鈕，每次選一個帳號。IMAP 郵箱仍在原表單驗證。
 - 「連接 AI」選 Codex、Cursor、Claude Desktop 或其他工具，複製對應設定，建立／撤銷 token，審核並撤銷 OAuth 應用授權。
 - 首次設定清單說明尚未完成的步驟；診斷檢查服務與資料庫設定，不會把設定存在誤報成郵箱或外部 HTTPS 已驗證。
 
@@ -75,8 +75,8 @@ python3 scripts/setup.py --url http://127.0.0.1:8080
 1. 在 [Google Cloud Console](https://console.cloud.google.com/) 建立自己的專案，啟用 Gmail API。
 2. 設定 OAuth consent screen，建立類型為 **Web application** 的 OAuth client。
 3. 加入精確的授權重新導向 URI：`https://mail.your-domain.com/api/oauth/gmail/callback`。
-4. 在 MailHarbor「設定 → Google / Gmail」填入 client ID 與 client secret，按「儲存設定」。設定加密保存在 SQLite，無需重新啟動。
-5. 在管理頁按 Google 登入。每個帳號各授權一次；重複新增不會讓其他帳號的 token 被覆蓋。
+4. 在 MailHarbor「設定 → 郵箱授權 → Google / Gmail」填入 client ID 與 client secret，按「儲存設定」。設定加密保存在 SQLite，無需重新啟動。
+5. 按「登入並新增 Gmail 帳號」，在 Google 選擇帳號。新增下一個帳號時，在同一處再次登入。
 
 服務要求唯讀 Gmail scope、`openid email` 身分資訊與離線授權。Google 將 `gmail.readonly` 分類為 Restricted。External＋Testing 狀態的 refresh token 通常 7 天到期，不能把測試狀態當長期免維護方案。個人自用可能符合驗證豁免，但公開提供給其他人、伺服器儲存 restricted data 等情況，可能需要驗證與安全評估；依 Google 實際專案狀態處理。
 
@@ -88,7 +88,7 @@ python3 scripts/setup.py --url http://127.0.0.1:8080
 2. 要同時使用個人與工作／學校郵箱，選支援組織目錄與個人 Microsoft 帳號的 account type。
 3. 設定 **Web** redirect URI：`https://mail.your-domain.com/api/oauth/microsoft/callback`，不要建立成 SPA。
 4. 加入本服務使用的 delegated permissions：`Mail.Read`、`User.Read`、`openid` 與 `offline_access`；不需要 application-wide mail permission。
-5. 建立 client secret，在 MailHarbor「設定 → Microsoft / Outlook」填 Application client ID 與 secret **value**，儲存後到「我的郵箱」登入。
+5. 建立 client secret，在 MailHarbor「設定 → 郵箱授權 → Microsoft / Outlook」填 Application client ID 與 secret **value**。儲存後按「登入並新增 Outlook 帳號」。每個帳號分別授權。
 
 工作帳號是否能授權由組織政策決定；遇到管理員同意要求需由租戶管理員處理。Client secret 到期也需要續期並更新管理頁設定。既有 `.env` 供應商欄位保留為初始備援；管理頁的已儲存值優先。網域、管理密碼雜湊與加密金鑰仍由部署設定管理。
 

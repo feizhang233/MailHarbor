@@ -98,6 +98,18 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.account(a["id"])["credentials"]["password"], "NEW_SECRET")
         self.assertEqual(self.store.search()["total"], 0)
 
+    def test_oauth_refresh_token_reuse_requires_same_identity_provider_and_client(self):
+        identity = {"email": "shared@example.test", "provider_uid": "first"}
+        old = {"client_id": "app-a", "refresh_token": "first-only", "access_token": "old"}
+        account = self.store.save_account("gmail", identity, old)
+        for provider, uid, client_id in (("gmail", "second", "app-a"), ("microsoft", "first", "app-a"),
+                                         ("gmail", "first", "app-b")):
+            with self.subTest(provider=provider, uid=uid, client_id=client_id), self.assertRaises(ValueError):
+                self.store.save_account(provider, {**identity, "provider_uid": uid},
+                                        {"client_id": client_id, "access_token": "fresh"})
+        self.assertEqual(self.store.account(account["id"])["credentials"], old)
+        self.assertEqual(len(self.store.accounts()), 1)
+
     def test_save_returns_its_committed_result_during_disconnect(self):
         # Disconnect immediately after the save transaction commits.
         database = self.store.db
@@ -255,6 +267,45 @@ class ApplicationTests(unittest.TestCase):
             self.assertEqual(callback("gmail"), "/?connected=1")
             self.assertEqual(callback("gmail"), "/?connection_error=1")
             exchange.assert_called_once()
+
+    def test_multiple_mailboxes_per_oauth_provider_and_repeat_login(self):
+        self.login()
+        setup = {"sync_interval_seconds": 300, "sync_days": 30, "sync_limit": 200,
+                 "microsoft_client_id": "ms-client", "microsoft_client_secret": "ms-secret"}
+        self.assertEqual(self.client.post("/api/settings", json=setup, headers=self.headers).status_code, 200)
+        store = self.app.state.store
+
+        def start(provider):
+            response = self.client.post(f"/api/oauth/{provider}/start", headers=self.headers)
+            params = parse_qs(urlsplit(response.json()["url"]).query)
+            self.assertIn("select_account", params["prompt"][0].split())
+            return params["state"][0]
+
+        def finish(provider, state, uid, renew=False):
+            email = f"{uid}@example.test"
+            profile = {"email": email, "sub": uid} if provider == "gmail" else {"mail": email, "id": uid}
+            token = {"access_token": f"{provider}-{uid}-{'new' if renew else 'old'}"}
+            if not renew:
+                token["refresh_token"] = f"{provider}-{uid}-refresh"
+            with patch("mailhub.providers._request_json", side_effect=[token, profile]):
+                result = self.client.get(f"/api/oauth/{provider}/callback",
+                                         params={"state": state, "code": "test-code"}, follow_redirects=False)
+            self.assertEqual(result.headers["location"], "/?connected=1")
+
+        for provider in ("gmail", "microsoft"):
+            with self.subTest(provider=provider):
+                first, second = start(provider), start(provider)
+                self.assertNotEqual(first, second)
+                finish(provider, second, "second")
+                finish(provider, first, "first")
+                ids = {a["email"]: a["id"] for a in store.accounts() if a["provider"] == provider}
+                self.assertEqual(set(ids), {"first@example.test", "second@example.test"})
+                finish(provider, start(provider), "first", renew=True)
+                for uid, suffix in (("first", "new"), ("second", "old")):
+                    credentials = store.account(ids[f"{uid}@example.test"])["credentials"]
+                    self.assertEqual(credentials["access_token"], f"{provider}-{uid}-{suffix}")
+                    self.assertEqual(credentials["refresh_token"], f"{provider}-{uid}-refresh")
+        self.assertEqual(len(self.client.get("/api/accounts").json()["accounts"]), 4)
 
     def test_preset_host_cannot_diverge_from_sync_host(self):
         self.login()

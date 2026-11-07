@@ -164,7 +164,7 @@ def _client():
     return httpx.Client(timeout=TIMEOUT, follow_redirects=False, trust_env=False)
 
 
-def _token_credentials(provider, result, previous=None):
+def _token_credentials(provider, result, previous=None, *, require_refresh=True):
     updated = dict(previous or {})
     if not isinstance(result.get("access_token"), str) or not result["access_token"]:
         raise ProviderError("服務未提供有效授權，請重新連接。")
@@ -176,7 +176,7 @@ def _token_credentials(provider, result, previous=None):
     updated["access_token"] = result["access_token"]
     if result.get("refresh_token"):
         updated["refresh_token"] = result["refresh_token"]
-    if not updated.get("refresh_token"):
+    if require_refresh and not updated.get("refresh_token"):
         raise ProviderError("未取得背景同步授權，請撤銷舊授權後重新連接。")
     try:
         updated["expires_at"] = time.time() + max(0, min(int(result.get("expires_in", 3600)), 86400))
@@ -197,7 +197,10 @@ def oauth_exchange(provider, settings, code, verifier) -> dict:
     if provider == "microsoft":
         fields["scope"] = scope
     with _client() as client:
-        return _token_credentials(provider, _request_json(client, "POST", endpoint, data=fields, oauth=True))
+        response = _request_json(client, "POST", endpoint, data=fields, oauth=True)
+    # A repeat grant may omit the refresh token. Only the verified mailbox can
+    # supply its existing token, after identify_oauth resolves the provider UID.
+    return {**_token_credentials(provider, response, require_refresh=False), "client_id": client_id}
 
 
 def _refresh(provider, credentials, settings):
@@ -213,7 +216,8 @@ def _refresh(provider, credentials, settings):
     if provider == "microsoft":
         fields["scope"] = scope
     with _client() as client:
-        return _token_credentials(provider, _request_json(client, "POST", endpoint, data=fields, oauth=True), credentials)
+        result = _request_json(client, "POST", endpoint, data=fields, oauth=True)
+    return {**_token_credentials(provider, result, credentials), "client_id": client_id}
 
 
 def identify_oauth(provider, credentials) -> dict:

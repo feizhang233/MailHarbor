@@ -54,6 +54,15 @@ class OAuthTests(unittest.TestCase):
         self.assertEqual(old["refresh_token"], "refresh-old")
         self.assertGreater(new["expires_at"], time.time())
 
+    @unittest.skipIf(httpx is None, "httpx dependency is not installed; HTTP integration test not run")
+    def test_legacy_credentials_bind_to_client_after_successful_refresh(self):
+        old = {"access_token": "expired", "refresh_token": "old", "expires_at": 0}
+        with patch.object(p, "_request_json", return_value={"access_token": "new-access"}):
+            refreshed = p._refresh("gmail", old, SETTINGS)
+        self.assertEqual(refreshed["client_id"], SETTINGS.google_client_id)
+        self.assertEqual(refreshed["refresh_token"], "old")
+        self.assertNotIn("client_id", old)
+
     def test_scope_checks_and_missing_background_access(self):
         with self.assertRaises(p.ProviderError):
             p._token_credentials("gmail", {"access_token": "x", "refresh_token": "r", "scope": "openid email"})

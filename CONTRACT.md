@@ -1,6 +1,6 @@
 # MailHarbor implementation contract
 
-Personal, single-owner, VPS-hosted mail aggregation service. Interface language: Traditional Chinese. AI tools are read-only. This is a new empty project.
+Personal, single-owner, VPS-hosted mail aggregation service. Traditional Chinese is the default interface language. The owner can change the language at sign-in or in settings. Only the language preference is stored in the browser. Mail, account names and other user content stay in the original language. AI tools are read-only. This is a new empty project.
 
 ## Stack and ownership
 

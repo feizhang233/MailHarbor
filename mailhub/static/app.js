@@ -11,16 +11,9 @@ const state = {
   oneTimeSecret: false, confirmTask: null, triggerMap: new WeakMap(), liveTimer: null,
   pollBusy: false, lastSyncSignature: "", lastAccountRenderSignature: "", requests: new Set(),
   settings: null, settingsDirty: false, settingsBusy: false, settingsEpoch: 0, setupEpoch: 0,
+  diagnostics: null, settingsCategory: "sync", settingsLoading: false, settingsFocus: "",
   grantsEpoch: 0, setup: null, oauthRequest: "", consentData: null, consentBusy: false, consentEpoch: 0,
 };
-const dateFormat = new Intl.DateTimeFormat("zh-TW", {
-  timeZone: "Europe/Belgrade", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
-});
-const longDateFormat = new Intl.DateTimeFormat("zh-TW", {
-  timeZone: "Europe/Belgrade", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
-});
-const numberFormat = new Intl.NumberFormat("zh-TW");
-
 function node(tag, className, text) {
   const element = document.createElement(tag);
   if (className) element.className = className;
@@ -28,9 +21,9 @@ function node(tag, className, text) {
   return element;
 }
 function date(value, long = false) {
-  if (!value) return "尚未同步";
+  if (!value) return t("尚未同步");
   const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? "時間不明" : (long ? longDateFormat : dateFormat).format(parsed);
+  return Number.isNaN(parsed.getTime()) ? t("時間不明") : (long ? longDateFormat : dateFormat).format(parsed);
 }
 function safeURL(value) {
   try {
@@ -39,11 +32,11 @@ function safeURL(value) {
   } catch { return null; }
 }
 function providerName(id) {
-  return state.providers.find((provider) => provider.id === id)?.name || id;
+  return t(state.providers.find((provider) => provider.id === id)?.name || id);
 }
 function snapshotRange(days, limit) {
-  const range = Number.isInteger(days) && days > 0 ? `近 ${numberFormat.format(days)} 天` : "天數未記錄";
-  const count = Number.isInteger(limit) && limit > 0 ? `最多 ${numberFormat.format(limit)} 封` : "封數未記錄";
+  const range = Number.isInteger(days) && days > 0 ? t("近 {0} 天", numberFormat.format(days)) : t("天數未記錄");
+  const count = Number.isInteger(limit) && limit > 0 ? t("最多 {0} 封", numberFormat.format(limit)) : t("封數未記錄");
   return range + " · " + count;
 }
 function notify(message) {
@@ -57,7 +50,7 @@ function setBusy(button, busy) {
 }
 function errorText(error) {
   if (error.name === "AbortError") return "";
-  return error.message || "無法完成要求，請稍後重試。";
+  return t(error.message || "") || t("無法完成要求，請稍後重試。");
 }
 function setFieldError(input, message) {
   input.setAttribute("aria-invalid", message ? "true" : "false");
@@ -72,14 +65,15 @@ function validateForm(form) {
   let first = null;
   for (const input of form.querySelectorAll("input")) {
     let message = "";
-    if (input.required && !input.value.trim()) message = "請填寫此欄位。";
-    else if (input.type === "email" && input.value && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.value)) message = "請填寫完整的郵箱地址。";
-    else if (input.type === "number" && (!Number.isInteger(Number(input.value)) || Number(input.value) < Number(input.min) || Number(input.value) > Number(input.max))) message = `請填寫 ${input.min}–${input.max} 之間的整數。`;
-    else if (input.maxLength > 0 && input.value.length > input.maxLength) message = "內容過長，請縮短後重試。";
+    if (input.required && !input.value.trim()) message = t("請填寫此欄位。");
+    else if (input.type === "email" && input.value && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.value)) message = t("請填寫完整的郵箱地址。");
+    else if (input.type === "number" && (!Number.isInteger(Number(input.value)) || Number(input.value) < Number(input.min) || Number(input.value) > Number(input.max))) message = t("請填寫 {0}–{1} 之間的整數。", input.min, input.max);
+    else if (input.maxLength > 0 && input.value.length > input.maxLength) message = t("內容過長，請縮短後重試。");
     setFieldError(input, message);
     if (message && !first) first = input;
   }
   if (first) {
+    revealSettingsField(first);
     const details = first.closest("details");
     if (details) details.open = true;
     first.focus();
@@ -90,9 +84,9 @@ function clearSecret(id) {
   $(id).value = "";
   $(id).type = "password";
   const button = document.querySelector(`[data-reveal="${id}"]`);
-  button.textContent = "顯示";
+  button.textContent = t("顯示");
   button.setAttribute("aria-pressed", "false");
-  button.setAttribute("aria-label", "顯示" + (id === "new-token" ? "存取金鑰" : "密碼"));
+  button.setAttribute("aria-label", id === "new-token" ? t("顯示存取金鑰") : t("顯示密碼"));
 }
 function resetSecrets() {
   for (const id of ["login-password", "account-password", "new-token", "google-client-secret", "microsoft-client-secret"]) clearSecret(id);
@@ -104,13 +98,12 @@ function openDialog(dialog, focusTarget) {
   (focusTarget || dialog.querySelector("button, input, select"))?.focus();
 }
 function closeDialog(dialog) {
-  if (dialog === $("account-dialog")) cancelOAuthStart();
   if (dialog.open) dialog.close();
   const trigger = state.triggerMap.get(dialog);
   if (trigger?.isConnected && !trigger.disabled) trigger.focus();
   else if (state.authenticated) $("main").focus();
 }
-function expireSession(message = "登入已逾時，請重新登入。") {
+function expireSession(message = t("登入已逾時，請重新登入。")) {
   state.authenticated = false;
   state.csrf = "";
   state.searchEpoch += 1;
@@ -125,7 +118,10 @@ function expireSession(message = "登入已逾時，請重新登入。") {
   state.settingsDirty = false;
   state.settingsBusy = false;
   state.settings = null;
+  state.settingsLoading = false;
+  state.settingsFocus = "";
   state.setup = null;
+  state.diagnostics = null;
   state.consentData = null;
   state.settingsEpoch += 1;
   state.setupEpoch += 1;
@@ -146,7 +142,7 @@ function expireSession(message = "登入已逾時，請重新登入。") {
   $("login-view").hidden = false;
   $("boot").hidden = true;
   $("login-error").textContent = message;
-  document.title = "登入 · MailHarbor";
+  document.title = t("登入 · MailHarbor");
   $("login-password").focus();
 }
 async function api(path, options = {}) {
@@ -170,18 +166,18 @@ async function api(path, options = {}) {
     let data;
     try { data = await response.json(); } catch { data = null; }
     if (csrfAtDispatch && !["/api/login", "/api/session"].includes(path) && state.csrf !== csrfAtDispatch) {
-      const stale = new Error("登入狀態已變更，忽略舊要求的回應。"); stale.name = "AbortError"; throw stale;
+      const stale = new Error(t("登入狀態已變更，忽略舊要求的回應。")); stale.name = "AbortError"; throw stale;
     }
     if (!response.ok) {
       if (response.status === 401 && path !== "/api/login") expireSession();
-      const defaultMessage = response.status === 403 ? "沒有權限完成這項操作，請重新登入後重試。" : "無法完成要求，請稍後重試。";
+      const defaultMessage = response.status === 403 ? t("沒有權限完成這項操作，請重新登入後重試。") : t("無法完成要求，請稍後重試。");
       const detail = typeof data?.detail === "string" ? data.detail : defaultMessage;
       const error = new Error(detail);
       error.status = response.status;
       throw error;
     }
     if (!data || typeof data !== "object" || Array.isArray(data)) {
-      const invalid = new Error(method === "GET" ? "伺服器回應格式無效，請重新整理。" : "伺服器回應格式無效，操作結果尚未確認。請先重新整理列表確認。");
+      const invalid = new Error(method === "GET" ? t("伺服器回應格式無效，請重新整理。") : t("伺服器回應格式無效，操作結果尚未確認。請先重新整理列表確認。"));
       invalid.uncertain = method !== "GET";
       throw invalid;
     }
@@ -189,14 +185,14 @@ async function api(path, options = {}) {
     return data;
   } catch (error) {
     if (controller.signal.aborted && !external?.aborted && controller.signal.reason === "timeout") {
-      const timed = new Error(method === "GET" ? "伺服器回應逾時，請重新整理。" : "等待逾時，操作可能已完成。請先重新整理列表確認，再嘗試一次。");
+      const timed = new Error(method === "GET" ? t("伺服器回應逾時，請重新整理。") : t("等待逾時，操作可能已完成。請先重新整理列表確認，再嘗試一次。"));
       timed.uncertain = method !== "GET";
       throw timed;
     }
     if (error instanceof TypeError && !controller.signal.aborted) {
-      $("network-banner").textContent = "暫時無法連接伺服器。現有資料可能不是最新狀態，請檢查網路後重新整理。";
+      $("network-banner").textContent = t("暫時無法連接伺服器。現有資料可能不是最新狀態，請檢查網路後重新整理。");
       $("network-banner").hidden = false;
-      const network = new Error(method === "GET" ? "無法連接伺服器，請檢查網路後重試。" : "連線中斷，操作結果尚未確認。請先重新整理列表確認。");
+      const network = new Error(method === "GET" ? t("無法連接伺服器，請檢查網路後重試。") : t("連線中斷，操作結果尚未確認。請先重新整理列表確認。"));
       network.uncertain = method !== "GET";
       throw network;
     }
@@ -223,40 +219,45 @@ function emptyState(container, title, description, action, actionLabel, symbol =
 function updateCoverage(coverage) {
   const days = coverage?.days || state.session.sync_days || 30;
   const limit = coverage?.per_account_limit || state.session.sync_limit || 200;
-  $("coverage").textContent = `同步目標：近 ${numberFormat.format(days)} 天 · 每個郵箱最多 ${numberFormat.format(limit)} 封`;
+  $("coverage").textContent = t("同步目標：近 {0} 天 · 每個郵箱最多 {1} 封", numberFormat.format(days), numberFormat.format(limit));
   const seconds = state.session.sync_interval_seconds || 300;
-  const interval = seconds % 60 === 0 ? `${seconds / 60} 分鐘` : `${seconds} 秒`;
+  const interval = seconds % 60 === 0 ? t("{0} 分鐘", seconds / 60) : t("{0} 秒", seconds);
   const failed = state.accounts.filter((account) => account.status === "error").length;
   const syncing = state.accounts.filter((account) => account.status === "syncing").length;
   const latest = state.accounts.map((account) => account.last_sync).filter(Boolean).sort().at(-1);
-  const pieces = [`自動同步約每 ${interval}`, "各帳號設定的資料夾"];
-  if (latest) pieces.push(`最近完成 ${date(latest)}`);
-  if (syncing) pieces.push(`${syncing} 個同步中`);
-  if (failed) pieces.push(`${failed} 個郵箱需要處理`);
-  $("sync-summary").textContent = pieces.join(" · ") + "。目前快取依各郵箱上次同步；目標變更於下次成功同步後套用。";
+  const pieces = [t("自動同步約每 {0}", interval), t("各帳號設定的資料夾")];
+  if (latest) pieces.push(t("最近完成 {0}", date(latest)));
+  if (syncing) pieces.push(t("{0} 個同步中", syncing));
+  if (failed) pieces.push(t("{0} 個郵箱需要處理", failed));
+  $("sync-summary").textContent = pieces.join(" · ") + t("。目前快取依各郵箱上次同步；目標變更於下次成功同步後套用。");
 }
 function choosePage() {
   const desired = location.hash.slice(1);
   const destination = ["inbox", "accounts", "connect", "settings"].includes(desired) ? desired : "inbox";
   if (state.settingsBusy && state.page === "settings" && destination !== "settings") {
     history.replaceState(null, "", location.pathname + location.search + "#settings");
-    notify("正在儲存設定，請稍候。"); return;
+    notify(t("正在儲存設定，請稍候。")); return;
   }
   if (state.settingsDirty && state.page === "settings" && destination !== "settings") {
     history.replaceState(null, "", location.pathname + location.search + "#settings");
-    askConfirmation("離開未儲存的設定？", "你填寫的同步設定與授權資料尚未儲存。離開會捨棄這些變更。", "捨棄變更並離開", async () => {
+    askConfirmation(t("離開未儲存的設定？"), t("你填寫的同步設定與授權資料尚未儲存。離開會捨棄這些變更。"), t("捨棄變更並離開"), async () => {
       discardSettings(); location.hash = destination;
     });
     return;
   }
+  if (state.page === "settings" && destination !== "settings") cancelOAuthStart();
   state.page = destination;
   for (const page of ["inbox", "accounts", "connect", "settings"]) $("page-" + page).hidden = page !== state.page;
+  if (destination === "settings" && state.settingsFocus) {
+    $(state.settingsFocus).focus();
+    state.settingsFocus = "";
+  }
   for (const link of document.querySelectorAll("[data-page]")) {
     if (link.dataset.page === state.page) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   }
-  const titles = { inbox: "統一收件匣", accounts: "我的郵箱", connect: "連接 AI", settings: "設定" };
-  document.title = state.authenticated ? `${titles[state.page]} · MailHarbor` : "登入 · MailHarbor";
+  const titles = { inbox: t("統一收件匣"), accounts: t("我的郵箱"), connect: t("連接 AI"), settings: t("設定") };
+  document.title = state.authenticated ? `${titles[state.page]} · MailHarbor` : t("登入 · MailHarbor");
   if (state.authenticated) {
     if (state.page === "inbox") void loadMessages();
     if (state.page === "accounts") void loadAccounts();
@@ -275,41 +276,41 @@ function updateConnectionConfig() {
   const token = authSelect.value === "token";
   let config, title, help, note;
   $("endpoint").value = client === "rest" ? origin + "/v1" : url;
-  $("endpoint-label").textContent = client === "rest" ? "REST API 位址" : "MCP 伺服器位址";
+  $("endpoint-label").textContent = client === "rest" ? t("REST API 位址") : t("MCP 伺服器位址");
   $("transport-label").textContent = client === "rest" ? "HTTPS · OpenAPI" : client === "claude" ? "stdio → HTTPS" : "Streamable HTTP";
   $("openapi-link").hidden = client !== "rest";
   $("openapi-link").href = origin + "/openapi.json";
   if (client === "codex") {
     title = "Codex · config.toml";
     config = `[mcp_servers.mailharbor]\nurl = ${JSON.stringify(url)}` + (token ? '\nbearer_token_env_var = "MAILHUB_MCP_TOKEN"' : "");
-    help = token ? "將設定加入 Codex 的 config.toml，並在啟動 Codex 的環境中設定 MAILHUB_MCP_TOKEN。" : "將設定加入 Codex 的 config.toml，執行 codex mcp login mailharbor，然後在本工作台確認讀取授權。";
-    note = token ? "在右側建立存取金鑰。設定範例只引用環境變數，不會包含金鑰。" : "OAuth 由 Codex 管理登入憑證；不需要把管理密碼或郵箱密碼填入 Codex。";
+    help = token ? t("將設定加入 Codex 的 config.toml，並在啟動 Codex 的環境中設定 MAILHUB_MCP_TOKEN。") : t("將設定加入 Codex 的 config.toml，執行 codex mcp login mailharbor，然後在本工作台確認讀取授權。");
+    note = token ? t("在右側建立存取金鑰。設定範例只引用環境變數，不會包含金鑰。") : t("OAuth 由 Codex 管理登入憑證；不需要把管理密碼或郵箱密碼填入 Codex。");
   } else if (client === "cursor") {
     title = "Cursor · mcp.json";
     const entry = { url };
     if (token) entry.headers = { Authorization: "Bearer ${env:MAILHUB_MCP_TOKEN}" };
     config = JSON.stringify({ mcpServers: { mailharbor: entry } }, null, 2);
-    help = token ? "加入 Cursor 的 MCP 設定，並確保 Cursor 啟動環境能讀到 MAILHUB_MCP_TOKEN。" : "加入 Cursor 的 MCP 設定後，從 Cursor 啟動連線／登入，在此工作台確認授權。";
-    note = token ? "環境變數插值會由 Cursor 處理；此範例不含實際金鑰。" : "實際授權完成前，新增設定不代表已成功連接。";
+    help = token ? t("加入 Cursor 的 MCP 設定，並確保 Cursor 啟動環境能讀到 MAILHUB_MCP_TOKEN。") : t("加入 Cursor 的 MCP 設定後，從 Cursor 啟動連線／登入，在此工作台確認授權。");
+    note = token ? t("環境變數插值會由 Cursor 處理；此範例不含實際金鑰。") : t("實際授權完成前，新增設定不代表已成功連接。");
   } else if (client === "claude") {
-    title = "Claude Desktop · 本機 stdio 設定";
+    title = t("Claude Desktop · 本機 stdio 設定");
     config = JSON.stringify({ mcpServers: { mailharbor: {
       command: "/path/to/MailHarbor/.venv/bin/python",
       args: ["/path/to/MailHarbor/scripts/stdio_bridge.py", "--url", url],
-      env: { MAILHUB_MCP_TOKEN: "<在私人客戶端設定填入專用 token>" },
+      env: { MAILHUB_MCP_TOKEN: "REPLACE_IN_PRIVATE_LOCAL_CONFIG_ONLY" },
     } } }, null, 2);
-    help = "在使用 Claude Desktop 的電腦安裝本專案與依賴，將兩個 /path/to 路徑換成該電腦的絕對路徑，再加入 Claude Desktop 的 MCP 設定。";
-    note = "這是本機橋接器，不是 VPS 上的檔案路徑。token 欄位只是佔位字；填入專用金鑰，或改由安全啟動器注入 MAILHUB_MCP_TOKEN。不要分享填入金鑰後的設定。";
+    help = t("在使用 Claude Desktop 的電腦安裝本專案與依賴，將兩個 /path/to 路徑換成該電腦的絕對路徑，再加入 Claude Desktop 的 MCP 設定。");
+    note = t("這是本機橋接器，不是 VPS 上的檔案路徑。token 欄位只是佔位字；填入專用金鑰，或改由安全啟動器注入 MAILHUB_MCP_TOKEN。不要分享填入金鑰後的設定。");
   } else if (client === "rest") {
-    title = "REST 呼叫範例";
+    title = t("REST 呼叫範例");
     config = `curl --fail-with-body \\\n  --header "Authorization: Bearer $MAILHUB_MCP_TOKEN" \\\n  "${origin}/v1/status"`;
-    help = "供自訂 AI 工具或 API 用戶端使用。讀取 /openapi.json 的唯讀路由定義，並在 Authorization 標頭傳入 Bearer 金鑰。";
-    note = "可用路由：GET /v1/accounts、/v1/messages、/v1/messages/{id}、/v1/status。搜尋與閱讀仍限於已同步快取。";
+    help = t("供自訂 AI 工具或 API 用戶端使用。讀取 /openapi.json 的唯讀路由定義，並在 Authorization 標頭傳入 Bearer 金鑰。");
+    note = t("可用路由：GET /v1/accounts、/v1/messages、/v1/messages/{id}、/v1/status。搜尋與閱讀仍限於已同步快取。");
   } else {
-    title = "OAuth MCP 連線資料";
+    title = t("OAuth MCP 連線資料");
     config = JSON.stringify({ mcp_url: url, authorization_server: origin, protected_resource_metadata: origin + "/.well-known/oauth-protected-resource/mcp", scope: "mail.read" }, null, 2);
-    help = "在支援遠端 MCP 與 OAuth 的 AI 工具中，新增上方 MCP 位址並啟動登入。工具需支援動態註冊、授權碼流程與 S256 PKCE。";
-    note = "這份資料供對照各平台的連線欄位，不是所有 AI 工具都接受的通用設定檔。登入後仍需在此工作台明確允許讀取。";
+    help = t("在支援遠端 MCP 與 OAuth 的 AI 工具中，新增上方 MCP 位址並啟動登入。工具需支援動態註冊、授權碼流程與 S256 PKCE。");
+    note = t("這份資料供對照各平台的連線欄位，不是所有 AI 工具都接受的通用設定檔。登入後仍需在此工作台明確允許讀取。");
   }
   $("config-title").textContent = title;
   $("client-instructions").textContent = help;
@@ -335,7 +336,7 @@ async function enterApp() {
     renderProviders();
     renderAccounts();
   } else {
-    $("callback-banner").textContent = "無法取得郵箱服務清單，請重新整理頁面後再連接郵箱。";
+    $("callback-banner").textContent = t("無法取得郵箱服務清單，請重新整理頁面後再連接郵箱。");
     $("callback-banner").hidden = false;
   }
   choosePage();
@@ -352,7 +353,7 @@ async function loadAccounts() {
     $("inbox-count").textContent = numberFormat.format(total);
     $("account-count").textContent = numberFormat.format(accounts.length);
     const filter = $("account-filter");
-    filter.replaceChildren(new Option("所有郵箱", ""));
+    filter.replaceChildren(new Option(t("所有郵箱"), ""));
     for (const account of accounts) filter.add(new Option(account.label ? `${account.label} · ${account.email}` : account.email, account.id));
     if (state.accountId && !accounts.some((account) => account.id === state.accountId)) {
       state.accountId = "";
@@ -370,13 +371,13 @@ async function loadAccounts() {
     state.lastSyncSignature = signature;
   } catch (error) {
     if (epoch !== state.accountEpoch || !state.authenticated) return;
-    if (!state.accounts.length) emptyState($("accounts-list"), "無法載入郵箱", errorText(error), () => void loadAccounts(), "重新載入", "!");
+    if (!state.accounts.length) emptyState($("accounts-list"), t("無法載入郵箱"), errorText(error), () => void loadAccounts(), t("重新載入"), "!");
   }
 }
 function renderAccounts() {
   const container = $("accounts-list");
   if (!state.accounts.length) {
-    emptyState(container, "先連接第一個郵箱", "選擇郵箱服務完成授權。之後可以繼續加入其他服務或同一服務的不同帳號。", openAccount, "連接郵箱", "◫");
+    emptyState(container, t("先連接第一個郵箱"), t("選擇郵箱服務完成授權。之後可以繼續加入其他服務或同一服務的不同帳號。"), openAccount, t("連接郵箱"), "◫");
     return;
   }
   container.replaceChildren();
@@ -384,27 +385,27 @@ function renderAccounts() {
     const card = node("article", "account-card panel");
     const header = node("div", "account-card-header");
     const initials = providerName(account.provider).slice(0, 1).toUpperCase();
-    const status = account.status === "error" ? ["error", "需要處理"] : account.status === "syncing" ? ["pending", "同步中"] : ["", account.last_sync ? "已連接" : "等待同步"];
+    const status = account.status === "error" ? ["error", t("需要處理")] : account.status === "syncing" ? ["pending", t("同步中")] : ["", account.last_sync ? t("已連接") : t("等待同步")];
     header.append(node("span", "provider-icon", initials), node("span", "tag " + status[0], status[1]));
     card.append(header, node("h2", "", account.label || account.email), node("p", "email", account.label ? account.email : providerName(account.provider)));
     const metadata = node("dl", "account-meta");
-    for (const [label, value] of [["郵箱服務", providerName(account.provider)], ["快取郵件", `${numberFormat.format(account.message_count || 0)} 封`], ["同步資料夾", account.folder || "INBOX"], ["快取同步範圍", snapshotRange(account.snapshot_days, account.snapshot_limit)], ["上次同步", date(account.last_sync, true)]]) {
+    for (const [label, value] of [[t("郵箱服務"), providerName(account.provider)], [t("快取郵件"), t("{0} 封", numberFormat.format(account.message_count || 0))], [t("同步資料夾"), account.folder || "INBOX"], [t("快取同步範圍"), snapshotRange(account.snapshot_days, account.snapshot_limit)], [t("上次同步"), date(account.last_sync, true)]]) {
       const row = node("div"); row.append(node("dt", "", label), node("dd", "", value)); metadata.append(row);
     }
     card.append(metadata);
-    if (account.error) card.append(node("p", "banner error", account.error));
+    if (account.error) card.append(node("p", "banner error", t(account.error)));
     const actions = node("div", "account-actions");
-    const sync = node("button", "button outline small", account.status === "syncing" ? "同步中" : "立即同步");
+    const sync = node("button", "button outline small", account.status === "syncing" ? t("同步中") : t("立即同步"));
     sync.type = "button"; sync.disabled = account.status === "syncing";
     sync.addEventListener("click", () => void syncAccount(account, sync));
-    const disconnect = node("button", "button danger-text small", "斷開連接");
+    const disconnect = node("button", "button danger-text small", t("斷開連接"));
     disconnect.type = "button";
-    disconnect.addEventListener("click", () => askConfirmation("斷開郵箱連接", `斷開「${account.email}」後，會移除本服務保存的登入資料和郵件快取。原郵箱中的郵件不會刪除。`, "斷開連接", async () => {
+    disconnect.addEventListener("click", () => askConfirmation(t("斷開郵箱連接"), t("斷開「{0}」後，會移除本服務保存的登入資料和郵件快取。原郵箱中的郵件不會刪除。", account.email), t("斷開連接"), async () => {
       await api(`/api/accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" });
       await loadAccounts();
       await loadSetup();
       if (state.page === "inbox") await loadMessages();
-      notify("已斷開郵箱連接。");
+      notify(t("已斷開郵箱連接。"));
     }));
     actions.append(sync, disconnect); card.append(actions); container.append(card);
   }
@@ -413,7 +414,7 @@ async function syncAccount(account, button) {
   setBusy(button, true);
   try {
     await api(`/api/accounts/${encodeURIComponent(account.id)}/sync`, { method: "POST" });
-    notify("已開始同步，可在郵箱狀態查看進度。");
+    notify(t("已開始同步，可在郵箱狀態查看進度。"));
     await loadAccounts();
   } catch (error) { notify(errorText(error)); await loadAccounts(); }
   finally { if (button.isConnected) setBusy(button, false); }
@@ -428,7 +429,7 @@ async function loadMessages() {
   list.setAttribute("aria-busy", "true");
   $("prev-page").disabled = true;
   $("next-page").disabled = true;
-  if (!list.children.length) emptyState(list, "正在載入郵件", "從你的中轉站讀取已同步的郵件。", null, "", "↻");
+  if (!list.children.length) emptyState(list, t("正在載入郵件"), t("從你的中轉站讀取已同步的郵件。"), null, "", "↻");
   const query = new URLSearchParams({ q: state.query, account_id: state.accountId, offset: String(state.offset), limit: String(state.limit) });
   try {
     const data = await api(`/api/messages?${query}`, { signal: controller.signal });
@@ -442,36 +443,36 @@ async function loadMessages() {
     renderMessages(data.messages);
     const start = state.total ? state.offset + 1 : 0;
     const end = Math.min(state.offset + data.messages.length, state.total);
-    $("page-range").textContent = `${numberFormat.format(start)}–${numberFormat.format(end)} ／ ${numberFormat.format(state.total)} 封`;
+    $("page-range").textContent = t("{0}–{1} ／ {2} 封", numberFormat.format(start), numberFormat.format(end), numberFormat.format(state.total));
     $("prev-page").disabled = state.offset === 0;
     $("next-page").disabled = state.offset + state.limit >= state.total;
   } catch (error) {
     if (epoch !== state.searchEpoch || controller.signal.aborted || !state.authenticated) return;
-    emptyState(list, "無法載入郵件", errorText(error), () => void loadMessages(), "重新載入", "!");
-    $("page-range").textContent = "尚未取得最新結果";
+    emptyState(list, t("無法載入郵件"), errorText(error), () => void loadMessages(), t("重新載入"), "!");
+    $("page-range").textContent = t("尚未取得最新結果");
   } finally { if (epoch === state.searchEpoch) list.setAttribute("aria-busy", "false"); }
 }
 function renderMessages(messages) {
   const list = $("mail-list");
   if (!messages.length) {
-    if (state.query) emptyState(list, "沒有符合的郵件", "試試較短的關鍵字，或切換郵箱。搜尋僅涵蓋目前已同步的郵件。", clearSearch, "清除搜尋", "⌕");
-    else if (!state.accounts.length) emptyState(list, "郵件會在這裡匯合", "連接你的第一個郵箱，開始跨帳號閱讀與搜尋。", openAccount, "連接郵箱");
-    else emptyState(list, "目前沒有快取郵件", "郵箱可能尚未完成同步，或同步範圍內沒有郵件。到「我的郵箱」查看狀態。", () => { location.hash = "accounts"; }, "查看我的郵箱");
+    if (state.query) emptyState(list, t("沒有符合的郵件"), t("試試較短的關鍵字，或切換郵箱。搜尋僅涵蓋目前已同步的郵件。"), clearSearch, t("清除搜尋"), "⌕");
+    else if (!state.accounts.length) emptyState(list, t("郵件會在這裡匯合"), t("連接你的第一個郵箱，開始跨帳號閱讀與搜尋。"), openAccount, t("連接郵箱"));
+    else emptyState(list, t("目前沒有快取郵件"), t("郵箱可能尚未完成同步，或同步範圍內沒有郵件。到「我的郵箱」查看狀態。"), () => { location.hash = "accounts"; }, t("查看我的郵箱"));
     return;
   }
   list.replaceChildren();
   for (const message of messages) {
     const row = node("button", "mail-row" + (message.unread ? " unread" : ""));
     row.type = "button";
-    row.setAttribute("aria-label", `${message.unread ? "未讀，" : ""}${message.subject || "無主旨"}，${message.sender || "寄件者不明"}，${message.account_email || ""}`);
-    const sender = node("span", "mail-sender", message.sender || "寄件者不明");
+    row.setAttribute("aria-label", `${message.unread ? t("未讀，") : ""}${message.subject || t("無主旨")}，${message.sender || t("寄件者不明")}，${message.account_email || ""}`);
+    const sender = node("span", "mail-sender", message.sender || t("寄件者不明"));
     const summary = node("span", "mail-summary");
-    const title = node("span", "mail-subject", message.subject || "（無主旨）");
-    const snippet = node("span", "mail-snippet", message.snippet || "開啟以閱讀內文");
+    const title = node("span", "mail-subject", message.subject || t("（無主旨）"));
+    const snippet = node("span", "mail-snippet", message.snippet || t("開啟以閱讀內文"));
     const origin = node("span", "mail-origin");
     origin.append(node("span", "tag neutral", providerName(message.provider)), node("span", "", message.account_email || ""));
-    if (message.unread) origin.append(node("span", "", "未讀"));
-    if (message.attachments?.length) origin.append(node("span", "", `${message.attachments.length} 個附件`));
+    if (message.unread) origin.append(node("span", "", t("未讀")));
+    if (message.attachments?.length) origin.append(node("span", "", t("{0} 個附件", message.attachments.length)));
     summary.append(title, snippet, origin);
     const received = node("time", "mail-date", date(message.received_at));
     if (message.received_at) received.dateTime = message.received_at;
@@ -508,38 +509,38 @@ async function openMessage(id) {
   state.readerController = controller;
   const epoch = ++state.readerEpoch;
   const content = $("reader-content");
-  const title = node("h2", "", "正在讀取郵件"); title.id = "reader-title";
-  content.replaceChildren(title, node("p", "muted", "正在讀取郵件快取…"));
+  const title = node("h2", "", t("正在讀取郵件")); title.id = "reader-title";
+  content.replaceChildren(title, node("p", "muted", t("正在讀取郵件快取…")));
   openDialog($("reader-dialog"), $("close-reader"));
   try {
     const { message } = await api(`/api/messages/${encodeURIComponent(id)}`, { signal: controller.signal });
     if (epoch !== state.readerEpoch || !$("reader-dialog").open || !state.authenticated) return;
-    title.textContent = message.subject || "（無主旨）";
+    title.textContent = message.subject || t("（無主旨）");
     const metadata = node("dl", "reader-meta");
     const recipients = Array.isArray(message.recipients) ? message.recipients.join(", ") : message.recipients;
-    for (const [label, value] of [["寄件者", message.sender], ["收件者", recipients], ["時間", date(message.received_at, true) + " · Europe/Belgrade"], ["來源", message.account_email], ["快取同步", message.sync?.last_sync ? date(message.sync.last_sync, true) + " · Europe/Belgrade" : "未記錄"], ["同步範圍", snapshotRange(message.sync?.days, message.sync?.per_account_limit)]]) {
+    for (const [label, value] of [[t("寄件者"), message.sender], [t("收件者"), recipients], [t("時間"), date(message.received_at, true) + " · Europe/Belgrade"], [t("來源"), message.account_email], [t("快取同步"), message.sync?.last_sync ? date(message.sync.last_sync, true) + " · Europe/Belgrade" : t("未記錄")], [t("同步範圍"), snapshotRange(message.sync?.days, message.sync?.per_account_limit)]]) {
       metadata.append(node("dt", "", label), node("dd", "", value || "—"));
     }
-    const body = node("div", "reader-body", message.body || "此郵件沒有可顯示的文字內文。");
+    const body = node("div", "reader-body", message.body || t("此郵件沒有可顯示的文字內文。"));
     content.replaceChildren(title, metadata);
-    if (message.body_truncated) content.append(node("p", "banner warning", "此郵件僅同步部分內容。完整內容請至原郵箱查看。"));
+    if (message.body_truncated) content.append(node("p", "banner warning", t("此郵件僅同步部分內容。完整內容請至原郵箱查看。")));
     content.append(body);
     if (message.attachments?.length) {
       const section = node("section", "attachment-list");
-      section.append(node("h3", "", `附件（${message.attachments.length}）`), node("p", "small muted", "僅列附件資料，不提供附件內容。"));
-      for (const attachment of message.attachments) section.append(node("div", "attachment", attachment.filename || "未命名附件"));
+      section.append(node("h3", "", t("附件（{0}）", message.attachments.length)), node("p", "small muted", t("僅列附件資料，不提供附件內容。")));
+      for (const attachment of message.attachments) section.append(node("div", "attachment", attachment.filename || t("未命名附件")));
       content.append(section);
     }
     const original = safeURL(message.source_url);
     if (original) {
-      const link = node("a", "button outline", "在原郵箱開啟 ↗");
+      const link = node("a", "button outline", t("在原郵箱開啟 ↗"));
       link.href = original; link.target = "_blank"; link.rel = "noopener noreferrer";
       content.append(link);
     }
   } catch (error) {
     if (epoch !== state.readerEpoch || controller.signal.aborted || !state.authenticated) return;
-    title.textContent = "無法讀取郵件";
-    const retry = node("button", "button outline", "重新載入"); retry.type = "button"; retry.addEventListener("click", () => void openMessage(id));
+    title.textContent = t("無法讀取郵件");
+    const retry = node("button", "button outline", t("重新載入")); retry.type = "button"; retry.addEventListener("click", () => void openMessage(id));
     content.replaceChildren(title, node("p", "error-line", errorText(error)), retry);
   }
 }
@@ -551,7 +552,7 @@ function closeReader() {
 function renderProviders() {
   const current = state.providers.find((provider) => provider.id === state.selectedProvider);
   const select = $("provider-select"); select.replaceChildren();
-  for (const provider of state.providers) select.add(new Option(provider.name, provider.id));
+  for (const provider of state.providers) select.add(new Option(t(provider.name), provider.id));
   if ($("account-dialog").open) {
     if (current) {
       select.value = current.id;
@@ -565,18 +566,18 @@ function renderProviders() {
   configureProvider();
 }
 function cancelOAuthStart() {
-  state.oauthStart?.abort();
+  if (!state.oauthStart) return;
+  state.oauthStart.controller.abort();
+  setBusy(state.oauthStart.button, false);
   state.oauthStart = null;
-  $("start-oauth").setAttribute("aria-busy", "false");
+  refreshSettingsLoginButtons();
 }
 function configureProvider() {
   const provider = state.providers.find((item) => item.id === $("provider-select").value);
-  if (provider?.id !== state.selectedProvider || !provider?.configured) cancelOAuthStart();
   state.selectedProvider = provider?.id || "";
   $("account-form").hidden = provider?.kind !== "imap";
-  $("oauth-pane").hidden = provider?.kind !== "oauth";
   $("unsupported-pane").hidden = provider?.kind !== "unsupported";
-  $("provider-note").textContent = provider?.note || "";
+  $("provider-note").textContent = t(provider?.note || "");
   const guide = safeURL(provider?.guide_url);
   $("provider-guide").hidden = !guide;
   if (guide) $("provider-guide").href = guide;
@@ -587,16 +588,10 @@ function configureProvider() {
   $("advanced-settings").open = provider?.id === "custom";
   clearValidation($("account-form"));
   $("account-error").textContent = "";
-  $("oauth-error").textContent = "";
-  $("start-oauth").disabled = Boolean(state.oauthStart) || !provider?.configured;
-  $("open-oauth-settings").hidden = Boolean(provider?.configured);
-  $("start-oauth").textContent = `登入 ${provider?.name || "郵箱"} 並授權`;
-  $("oauth-state").textContent = provider?.configured ? "前往服務商的登入頁面，可選擇或新增另一個帳號。授權完成後會回到這裡。" : "伺服器尚未設定此服務的 OAuth 應用。請先依部署說明填入 Client ID、Client Secret 和回呼網址。";
-  $("oauth-state").className = "banner" + (provider?.configured ? "" : " warning");
-  $("unsupported-pane").textContent = provider?.note || "此服務目前無法直接連接。";
+  $("unsupported-pane").textContent = t(provider?.note || "") || t("此服務目前無法直接連接。");
 }
 function openAccount() {
-  if (!state.providers.length) { notify("郵箱服務清單尚未載入，請重新整理頁面。"); return; }
+  if (!state.providers.length) { notify(t("郵箱服務清單尚未載入，請重新整理頁面。")); return; }
   $("account-form").reset();
   clearSecret("account-password");
   state.accountDirty = false; state.accountBusy = false; state.pendingDiscard = null;
@@ -609,6 +604,12 @@ function changeProvider(nextId) {
   const select = $("provider-select");
   const current = state.providers.find((item) => item.id === state.selectedProvider);
   const next = state.providers.find((item) => item.id === nextId);
+  if (!next || state.accountBusy) return;
+  if (next.kind === "oauth") {
+    select.value = state.selectedProvider;
+    guardDiscard(() => goToMailboxSettings(next.id));
+    return;
+  }
   if (current?.kind === "imap" && next?.kind === "imap") {
     clearSecret("account-password");
     state.pendingDiscard = null;
@@ -620,6 +621,27 @@ function changeProvider(nextId) {
   }
   select.value = state.selectedProvider;
   guardDiscard(() => { clearSecret("account-password"); select.value = nextId; configureProvider(); });
+}
+function goToMailboxSettings(providerId) {
+  state.accountDirty = false;
+  $("account-form").reset();
+  clearSecret("account-password");
+  closeDialog($("account-dialog"));
+  openProviderSettings(providerId);
+}
+function routeMailboxAddress() {
+  if (state.selectedProvider !== "custom" || state.accountBusy) return false;
+  const email = $("account-email").value.trim();
+  const providerId = /^[^@\s]+@(?:gmail|googlemail)\.com$/i.test(email) ? "gmail" :
+    /^[^@\s]+@(?:outlook|hotmail|live|msn)\.com$/i.test(email) ? "microsoft" : null;
+  if (!providerId || !state.providers.some((provider) => provider.id === providerId)) return false;
+  // A newly entered address needs no discard prompt. Protect any other IMAP draft fields.
+  if (!state.pendingDiscard) {
+    state.accountDirty = ["account-label", "account-password", "account-host", "account-username", "account-folder"]
+      .some((id) => $(id).value !== $(id).defaultValue);
+    guardDiscard(() => goToMailboxSettings(providerId));
+  }
+  return true;
 }
 function guardDiscard(action) {
   if (state.accountBusy) return;
@@ -642,37 +664,37 @@ function askConfirmation(title, description, label, action) {
 async function loadTokens() {
   const epoch = ++state.tokenEpoch;
   const list = $("tokens-list");
-  if (!list.children.length) list.replaceChildren(node("p", "token-empty", "正在載入金鑰…"));
+  if (!list.children.length) list.replaceChildren(node("p", "token-empty", t("正在載入金鑰…")));
   try {
     const { tokens } = await api("/api/tokens");
     if (epoch !== state.tokenEpoch || !state.authenticated) return;
     list.replaceChildren();
-    if (!tokens.length) { list.append(node("p", "token-empty", "尚未建立金鑰。先為你的 Codex 建立一組。")); return; }
+    if (!tokens.length) { list.append(node("p", "token-empty", t("尚未建立金鑰。先為你的 Codex 建立一組。"))); return; }
     for (const token of tokens) {
       const item = node("div", "token-item");
       const info = node("div");
-      info.append(node("strong", "", token.name), node("p", "", "建立於 " + date(token.created_at, true)), node("p", "", token.last_used_at ? "上次使用 " + date(token.last_used_at, true) : "尚未使用"));
-      const revoke = node("button", "button danger-text small", "撤銷"); revoke.type = "button";
-      revoke.addEventListener("click", () => askConfirmation("撤銷存取金鑰", `撤銷「${token.name}」後，使用這組金鑰的 AI 將無法讀取郵件。你可以另外建立一組金鑰。`, "撤銷金鑰", async () => {
+      info.append(node("strong", "", token.name), node("p", "", t("建立於 ") + date(token.created_at, true)), node("p", "", token.last_used_at ? t("上次使用 ") + date(token.last_used_at, true) : t("尚未使用")));
+      const revoke = node("button", "button danger-text small", t("撤銷")); revoke.type = "button";
+      revoke.addEventListener("click", () => askConfirmation(t("撤銷存取金鑰"), t("撤銷「{0}」後，使用這組金鑰的 AI 將無法讀取郵件。你可以另外建立一組金鑰。", token.name), t("撤銷金鑰"), async () => {
         await api(`/api/tokens/${encodeURIComponent(token.id)}`, { method: "DELETE" });
-        await loadTokens(); await loadSetup(); notify("已撤銷存取金鑰。");
+        await loadTokens(); await loadSetup(); notify(t("已撤銷存取金鑰。"));
       }));
       item.append(info, revoke); list.append(item);
     }
   } catch (error) {
     if (epoch !== state.tokenEpoch || !state.authenticated) return;
-    const retry = node("button", "button outline small", "重新載入"); retry.type = "button"; retry.addEventListener("click", () => void loadTokens());
+    const retry = node("button", "button outline small", t("重新載入")); retry.type = "button"; retry.addEventListener("click", () => void loadTokens());
     list.replaceChildren(node("p", "error-line", errorText(error)), retry);
   }
 }
 async function copyText(value, input, status) {
   try {
     await navigator.clipboard.writeText(value);
-    if (status) status.textContent = "已複製，請存放在安全的位置。";
-    else notify("已複製。");
+    if (status) status.textContent = t("已複製，請存放在安全的位置。");
+    else notify(t("已複製。"));
   } catch {
     input?.focus(); input?.select();
-    const message = "瀏覽器無法自動複製，請選取內容後手動複製。";
+    const message = t("瀏覽器無法自動複製，請選取內容後手動複製。");
     if (status) status.textContent = message; else notify(message);
   }
 }
@@ -687,31 +709,89 @@ async function loadSetup() {
   try {
     const setup = await api("/api/setup");
     if (epoch !== state.setupEpoch || !state.authenticated) return;
-    if (!Array.isArray(setup.steps)) throw new Error("無法取得設定步驟，請重新整理。");
+    if (!Array.isArray(setup.steps)) throw new Error(t("無法取得設定步驟，請重新整理。"));
     state.setup = setup;
     $("setup-panel").hidden = setup.ready === true;
     const list = $("setup-steps"); list.replaceChildren();
     const complete = setup.steps.filter((step) => step.complete).length;
-    $("setup-progress").textContent = `${complete} / ${setup.steps.length} 已完成`;
+    $("setup-progress").textContent = t("{0} / {1} 已完成", complete, setup.steps.length);
     setup.steps.forEach((step, index) => {
       const row = node("div", "setup-step" + (step.complete ? " complete" : ""));
       const marker = node("span", "step-marker", step.complete ? "✓" : String(index + 1));
-      marker.setAttribute("aria-label", step.complete ? "已完成" : "待完成");
-      const text = node("div"); text.append(node("strong", "", step.title), node("p", "", step.detail));
+      marker.setAttribute("aria-label", step.complete ? t("已完成") : t("待完成"));
+      const detail = step.id === "mailbox" && Number.isInteger(setup.counts?.accounts)
+        ? t("已連接 {0} 個郵箱。", setup.counts.accounts) : t(step.detail);
+      const text = node("div");
+      text.append(node("strong", "", t(step.title)), node("p", "", detail));
       row.append(marker, text); list.append(row);
     });
   } catch (error) {
     if (epoch !== state.setupEpoch || !state.authenticated) return;
     if (!state.accounts.length) {
       $("setup-panel").hidden = false;
-      $("setup-progress").textContent = "尚未取得狀態";
-      const retry = node("button", "button outline small", "重新取得狀態"); retry.type = "button";
+      $("setup-progress").textContent = t("尚未取得狀態");
+      const retry = node("button", "button outline small", t("重新取得狀態")); retry.type = "button";
       retry.addEventListener("click", () => void loadSetup());
       $("setup-steps").replaceChildren(node("p", "error-line", errorText(error)), retry);
     }
   }
 }
 
+const settingsCategories = ["sync", "accounts", "display", "mcp", "service"];
+
+function updateSettingsSaveRow() {
+  $("settings-save-row").hidden = !state.settingsDirty && !["sync", "accounts"].includes(state.settingsCategory);
+}
+function selectSettingsCategory(category) {
+  if (state.settingsCategory === "accounts" && category !== "accounts") cancelOAuthStart();
+  state.settingsCategory = category;
+  for (const name of settingsCategories) {
+    $("group-" + name).hidden = name !== category;
+    $("category-" + name).setAttribute("aria-pressed", String(name === category));
+  }
+  updateSettingsSaveRow();
+}
+function selectSettingsProvider(service) {
+  if ($(service + "-settings").hidden) cancelOAuthStart();
+  for (const name of ["google", "microsoft"]) {
+    $(name + "-settings").hidden = name !== service;
+    $("select-" + name).setAttribute("aria-pressed", String(name === service));
+  }
+}
+function navigateToSettings(category, focusId) {
+  selectSettingsCategory(category);
+  if (state.page === "settings" && location.hash === "#settings") {
+    $(focusId).focus();
+  } else {
+    state.settingsFocus = focusId;
+    location.hash = "settings";
+  }
+}
+function openProviderSettings(providerId) {
+  const service = providerId === "gmail" ? "google" : "microsoft";
+  selectSettingsProvider(service);
+  navigateToSettings("accounts", service + "-settings-title");
+}
+function revealSettingsField(field) {
+  if (field.form !== $("settings-form")) return;
+  if (field.closest("#group-sync")) selectSettingsCategory("sync");
+  else {
+    selectSettingsCategory("accounts");
+    selectSettingsProvider(field.closest("#google-settings") ? "google" : "microsoft");
+  }
+}
+function refreshSettingsLoginButtons() {
+  for (const service of ["google", "microsoft"]) {
+    const button = $(service + "-login");
+    const settings = state.settings?.[service];
+    const configured = Boolean(settings?.client_id && settings.secret_configured);
+    button.disabled = !state.authenticated || !configured || state.settingsDirty || state.settingsBusy || state.settingsLoading || Boolean(state.oauthStart);
+    let hint = "";
+    if (state.settingsDirty) hint = t("請先儲存或捨棄設定變更。");
+    else if (!configured && !state.settingsLoading) hint = t("填入 Client ID 和 Client Secret 並儲存後，即可登入。");
+    $(service + "-login-hint").textContent = hint;
+  }
+}
 function renderSettings(settings) {
   state.settings = settings;
   $("sync-interval").value = String(settings.sync_interval_seconds);
@@ -725,24 +805,29 @@ function renderSettings(settings) {
     $(service + "-client-secret").type = "password";
     $(service + "-client-secret").disabled = false;
     const reveal = document.querySelector(`[data-reveal="${service}-client-secret"]`);
-    reveal.textContent = "顯示"; reveal.setAttribute("aria-pressed", "false"); reveal.disabled = false;
+    reveal.textContent = t("顯示"); reveal.setAttribute("aria-pressed", "false"); reveal.disabled = false;
     $("clear-" + service + "-secret").checked = false;
     $("clear-" + service + "-secret").disabled = !provider.secret_configured;
     $(service + "-redirect").value = provider.redirect_uri;
-    $(service + "-configured").textContent = provider.secret_configured ? "已儲存 Secret" : "尚未設定 Secret";
+    $(service + "-configured").textContent = provider.secret_configured ? t("已儲存 Secret") : t("尚未設定 Secret");
     $(service + "-configured").className = "tag" + (provider.secret_configured ? "" : " neutral");
   }
   clearValidation($("settings-form"));
   state.settingsDirty = false;
-  $("settings-dirty").textContent = "尚未變更設定。";
+  $("settings-dirty").textContent = t("尚未變更設定。");
   $("settings-fields").disabled = false;
   $("settings-status").hidden = true;
   $("retry-settings").hidden = true;
   $("settings-error").textContent = "";
+  updateSettingsSaveRow();
+  refreshSettingsLoginButtons();
 }
 function markSettingsDirty() {
   state.settingsDirty = true;
-  $("settings-dirty").textContent = "有尚未儲存的變更。";
+  cancelOAuthStart();
+  updateSettingsSaveRow();
+  refreshSettingsLoginButtons();
+  $("settings-dirty").textContent = t("有尚未儲存的變更。");
 }
 function discardSettings() {
   if (state.settings) renderSettings(state.settings);
@@ -754,7 +839,9 @@ function discardSettings() {
 async function loadSettings() {
   if (state.settingsDirty || state.settingsBusy) return;
   const epoch = ++state.settingsEpoch;
-  $("settings-status").textContent = "正在載入設定…";
+  state.settingsLoading = true;
+  refreshSettingsLoginButtons();
+  $("settings-status").textContent = t("正在載入設定…");
   $("settings-status").className = "banner";
   $("settings-status").hidden = false;
   $("retry-settings").hidden = true;
@@ -768,6 +855,11 @@ async function loadSettings() {
     $("settings-status").textContent = errorText(error);
     $("settings-status").className = "banner error";
     $("retry-settings").hidden = false;
+  } finally {
+    if (epoch === state.settingsEpoch) {
+      state.settingsLoading = false;
+      refreshSettingsLoginButtons();
+    }
   }
 }
 function collectSettings() {
@@ -792,13 +884,20 @@ async function saveSettings(event) {
     const previous = state.settings?.[provider];
     const newId = $(provider + "-client-id").value.trim();
     if (previous?.secret_configured && newId && newId !== previous.client_id && !$(provider + "-client-secret").value.trim() && !$("clear-" + provider + "-secret").checked) {
-      setFieldError($(provider + "-client-secret"), "變更 Client ID 時，請一併填入新的 Secret，或勾選清除原值。");
+      revealSettingsField($(provider + "-client-secret"));
+      setFieldError($(provider + "-client-secret"), t("變更 Client ID 時，請一併填入新的 Secret，或勾選清除原值。"));
       $(provider + "-client-secret").focus(); return;
     }
   }
   const body = collectSettings();
   const button = $("save-settings");
+  // A reload started before this edit may still return the previous settings.
+  state.settingsEpoch++;
+  state.settingsLoading = false;
+  $("settings-status").hidden = true;
+  $("retry-settings").hidden = true;
   state.settingsBusy = true; setBusy(button, true); $("settings-fields").disabled = true;
+  refreshSettingsLoginButtons();
   $("settings-error").textContent = "";
   try {
     const settings = await api("/api/settings", { method: "POST", body });
@@ -806,66 +905,78 @@ async function saveSettings(event) {
     renderSettings(settings);
     state.session = { ...state.session, public_url: settings.public_url, sync_interval_seconds: settings.sync_interval_seconds, sync_days: settings.sync_days, sync_limit: settings.sync_limit };
     updateCoverage(); updateConnectionConfig();
-    notify("設定已儲存，會套用到下一次同步。");
+    notify(t("設定已儲存，會套用到下一次同步。"));
     await loadSetup();
     try {
       const { providers } = await api("/api/providers");
       if (state.authenticated) { state.providers = providers; renderProviders(); }
     } catch {
-      if (state.authenticated) { $("settings-status").textContent = "設定已儲存，但服務清單尚未更新。連接郵箱前請重新整理頁面。"; $("settings-status").hidden = false; }
+      if (state.authenticated) { $("settings-status").textContent = t("設定已儲存，但服務清單尚未更新。連接郵箱前請重新整理頁面。"); $("settings-status").hidden = false; }
     }
   } catch (error) {
     if (!state.authenticated) return;
     $("settings-error").textContent = errorText(error);
-    if (error.uncertain) $("settings-error").textContent += " 先捨棄本機表單並重新載入，即可確認伺服器目前的設定。";
+    if (error.uncertain) $("settings-error").textContent += t(" 先捨棄本機表單並重新載入，即可確認伺服器目前的設定。");
   } finally {
     state.settingsBusy = false; setBusy(button, false);
     $("settings-fields").disabled = !state.authenticated;
+    refreshSettingsLoginButtons();
   }
+}
+function renderDiagnostics(result) {
+  const list = $("diagnostics-results");
+  list.replaceChildren();
+  for (const check of result.checks) {
+    const row = node("div", "diagnostic-item");
+    const labels = { pass: ["", t("通過")], warning: ["pending", t("提醒")], fail: ["error", t("未通過")] };
+    const label = labels[check.status] || ["neutral", t("未知")];
+    const isService = ["database", "origin", "google", "microsoft"].includes(check.id);
+    let detail = t(check.detail);
+    if (check.id === "origin") detail = t("{0}；此檢查未驗證外部 DNS 或 TLS 憑證。", state.session.public_url);
+    else if (!isService && check.detail.startsWith("上次同步：")) {
+      detail = t("上次同步：{0}", date(check.detail.slice("上次同步：".length), true));
+    }
+    const info = node("div"); info.append(node("strong", "", isService ? t(check.name) : check.name), node("p", "", detail));
+    row.append(node("span", "tag " + label[0], label[1]), info); list.append(row);
+  }
+  list.append(node("p", "footnote", t("檢查時間：") + date(result.checked_at, true) + " · Europe/Belgrade"));
 }
 async function runDiagnostics() {
   const button = $("run-diagnostics"); if (button.disabled) return;
   setBusy(button, true);
   const list = $("diagnostics-results");
-  list.replaceChildren(node("p", "small muted", "正在檢查服務設定與資料庫…"));
+  list.replaceChildren(node("p", "small muted", t("正在檢查服務設定與資料庫…")));
   try {
     const result = await api("/api/diagnostics", { method: "POST" });
     if (!state.authenticated) return;
-    list.replaceChildren();
-    for (const check of result.checks) {
-      const row = node("div", "diagnostic-item");
-      const labels = { pass: ["", "通過"], warning: ["pending", "提醒"], fail: ["error", "未通過"] };
-      const label = labels[check.status] || ["neutral", "未知"];
-      const info = node("div"); info.append(node("strong", "", check.name), node("p", "", check.detail));
-      row.append(node("span", "tag " + label[0], label[1]), info); list.append(row);
-    }
-    list.append(node("p", "footnote", "檢查時間：" + date(result.checked_at, true) + " · Europe/Belgrade"));
+    state.diagnostics = result;
+    renderDiagnostics(result);
   } catch (error) { if (state.authenticated) list.replaceChildren(node("p", "error-line", errorText(error))); }
   finally { setBusy(button, false); }
 }
 async function loadGrants() {
   const epoch = ++state.grantsEpoch;
   const list = $("grants-list");
-  if (!list.children.length) list.replaceChildren(node("p", "token-empty", "正在載入應用程式授權…"));
+  if (!list.children.length) list.replaceChildren(node("p", "token-empty", t("正在載入應用程式授權…")));
   try {
     const { grants } = await api("/api/oauth/grants");
     if (epoch !== state.grantsEpoch || !state.authenticated) return;
     list.replaceChildren();
-    if (!grants.length) { list.append(node("p", "token-empty", "尚未授權任何應用程式。先在 AI 工具新增 MCP 位址並啟動登入。")); return; }
+    if (!grants.length) { list.append(node("p", "token-empty", t("尚未授權任何應用程式。先在 AI 工具新增 MCP 位址並啟動登入。"))); return; }
     for (const grant of grants) {
       const row = node("div", "token-item");
       const info = node("div");
-      info.append(node("strong", "", grant.client_name), node("p", "", "授權於 " + date(grant.created_at, true)), node("p", "", grant.last_used_at ? "上次使用 " + date(grant.last_used_at, true) : "尚未使用"));
-      const revoke = node("button", "button danger-text small", "撤銷授權"); revoke.type = "button";
-      revoke.addEventListener("click", () => askConfirmation("撤銷應用程式授權", `「${grant.client_name}」將無法再使用這次授權讀取任何郵箱快取，其更新憑證也會失效。其他獨立授權不受影響。`, "撤銷授權", async () => {
+      info.append(node("strong", "", grant.client_name), node("p", "", t("授權於 ") + date(grant.created_at, true)), node("p", "", grant.last_used_at ? t("上次使用 ") + date(grant.last_used_at, true) : t("尚未使用")));
+      const revoke = node("button", "button danger-text small", t("撤銷授權")); revoke.type = "button";
+      revoke.addEventListener("click", () => askConfirmation(t("撤銷應用程式授權"), t("「{0}」將無法再使用這次授權讀取任何郵箱快取，其更新憑證也會失效。其他獨立授權不受影響。", grant.client_name), t("撤銷授權"), async () => {
         await api(`/api/oauth/grants/${encodeURIComponent(grant.id)}`, { method: "DELETE" });
-        await loadGrants(); await loadSetup(); notify("已撤銷應用程式授權。");
+        await loadGrants(); await loadSetup(); notify(t("已撤銷應用程式授權。"));
       }));
       row.append(info, revoke); list.append(row);
     }
   } catch (error) {
     if (epoch !== state.grantsEpoch || !state.authenticated) return;
-    const retry = node("button", "button outline small", "重新載入"); retry.type = "button";
+    const retry = node("button", "button outline small", t("重新載入")); retry.type = "button";
     retry.addEventListener("click", () => void loadGrants());
     list.replaceChildren(node("p", "error-line", errorText(error)), retry);
   }
@@ -883,31 +994,31 @@ async function loadConsent() {
   const epoch = ++state.consentEpoch;
   $("pending-consent").hidden = false;
   $("consent-error").textContent = "";
-  $("consent-details").replaceChildren(node("dt", "", "狀態"), node("dd", "", "正在讀取授權要求…"));
+  $("consent-details").replaceChildren(node("dt", "", t("狀態")), node("dd", "", t("正在讀取授權要求…")));
   $("consent-expiry").textContent = "";
   $("consent-approve").disabled = true; $("consent-deny").disabled = true;
   openDialog($("consent-dialog"), $("consent-later"));
   try {
     const data = await api(`/api/oauth/consent?${new URLSearchParams({ request_id: state.oauthRequest })}`);
     if (epoch !== state.consentEpoch || !state.authenticated) return;
-    if (data.request_id !== state.oauthRequest) throw new Error("授權要求不一致，請由 AI 工具重新發起連線。");
+    if (data.request_id !== state.oauthRequest) throw new Error(t("授權要求不一致，請由 AI 工具重新發起連線。"));
     state.consentData = data;
     const list = $("consent-details"); list.replaceChildren();
-    for (const [label, value] of [["應用程式", data.client_name], ["完成後返回", data.redirect_uri], ["郵件服務", data.resource], ["授權範圍", "mail.read · 所有郵箱快取"]]) list.append(node("dt", "", label), node("dd", "", value));
-    $("consent-expiry").textContent = "有效至 " + date(data.expires_at, true) + " · Europe/Belgrade";
+    for (const [label, value] of [[t("應用程式"), data.client_name], [t("完成後返回"), data.redirect_uri], [t("郵件服務"), data.resource], [t("授權範圍"), t("mail.read · 所有郵箱快取")]]) list.append(node("dt", "", label), node("dd", "", value));
+    $("consent-expiry").textContent = t("有效至 ") + date(data.expires_at, true) + " · Europe/Belgrade";
     const expired = !Number.isFinite(new Date(data.expires_at).getTime()) || new Date(data.expires_at).getTime() <= Date.now();
     $("consent-approve").disabled = expired; $("consent-deny").disabled = expired;
-    if (expired) $("consent-error").textContent = "授權要求已逾時，請回到 AI 工具重新發起登入。";
+    if (expired) $("consent-error").textContent = t("授權要求已逾時，請回到 AI 工具重新發起登入。");
   } catch (error) {
     if (epoch !== state.consentEpoch || !state.authenticated) return;
     state.consentData = null;
-    $("consent-error").textContent = errorText(error) + " 若已重新登入或要求逾時，請由 AI 工具重新發起連線。";
+    $("consent-error").textContent = errorText(error) + t(" 若已重新登入或要求逾時，請由 AI 工具重新發起連線。");
   }
 }
 async function resolveConsent(approve) {
   if (state.consentBusy || !state.consentData) return;
   if (new Date(state.consentData.expires_at).getTime() <= Date.now()) {
-    $("consent-error").textContent = "授權要求已逾時，請回到 AI 工具重新發起登入。";
+    $("consent-error").textContent = t("授權要求已逾時，請回到 AI 工具重新發起登入。");
     $("consent-approve").disabled = true; $("consent-deny").disabled = true; return;
   }
   state.consentBusy = true;
@@ -918,7 +1029,7 @@ async function resolveConsent(approve) {
     const { redirect_url } = await api("/api/oauth/consent", { method: "POST", body: { request_id: state.oauthRequest, approve } });
     if (!state.authenticated) return;
     const target = safeOAuthRedirect(redirect_url);
-    if (!target) throw new Error("服務回傳的重新導向網址不受支援，請從 AI 工具重新發起連線。");
+    if (!target) throw new Error(t("服務回傳的重新導向網址不受支援，請從 AI 工具重新發起連線。"));
     state.oauthRequest = ""; state.consentData = null;
     const params = new URLSearchParams(location.search); params.delete("oauth_request");
     history.replaceState(null, "", location.pathname + (params.size ? "?" + params.toString() : "") + location.hash);
@@ -948,21 +1059,23 @@ $("login-form").addEventListener("submit", async (event) => {
   finally { setBusy(button, false); }
 });
 async function performLogout() {
+  cancelOAuthStart();
   const button = $("logout"); button.disabled = true;
   try { await api("/api/logout", { method: "POST" }); expireSession(""); }
   catch (error) { notify(errorText(error)); }
   finally { button.disabled = false; }
 }
 $("logout").addEventListener("click", () => {
-  if (state.settingsBusy) { notify("正在儲存設定，請稍候。"); return; }
-  if (state.settingsDirty) askConfirmation("捨棄未儲存的設定並登出？", "尚未儲存的同步設定與授權資料會清除。已儲存在伺服器的設定不受影響。", "捨棄變更並登出", async () => { discardSettings(); await performLogout(); });
+  if (state.settingsBusy) { notify(t("正在儲存設定，請稍候。")); return; }
+  if (state.settingsDirty) askConfirmation(t("捨棄未儲存的設定並登出？"), t("尚未儲存的同步設定與授權資料會清除。已儲存在伺服器的設定不受影響。"), t("捨棄變更並登出"), async () => { discardSettings(); await performLogout(); });
   else void performLogout();
 });
 for (const button of document.querySelectorAll("[data-reveal]")) button.addEventListener("click", () => {
   const input = $(button.dataset.reveal);
   const reveal = input.type === "password"; input.type = reveal ? "text" : "password";
-  button.textContent = reveal ? "隱藏" : "顯示";
-  button.setAttribute("aria-label", `${reveal ? "隱藏" : "顯示"}${input.id === "new-token" ? "存取金鑰" : "密碼"}`);
+  button.textContent = reveal ? t("隱藏") : t("顯示");
+  button.setAttribute("aria-label", input.id === "new-token"
+    ? (reveal ? t("隱藏存取金鑰") : t("顯示存取金鑰")) : (reveal ? t("隱藏密碼") : t("顯示密碼")));
   button.setAttribute("aria-pressed", String(reveal));
 });
 for (const button of document.querySelectorAll("[data-open-account]")) button.addEventListener("click", openAccount);
@@ -987,6 +1100,7 @@ $("discard-account-confirm").addEventListener("click", () => {
   $("account-form").reset(); $("discard-account").hidden = true; action?.();
 });
 $("provider-select").addEventListener("change", () => changeProvider($("provider-select").value));
+$("account-email").addEventListener("change", routeMailboxAddress);
 $("use-custom-imap").addEventListener("click", () => {
   changeProvider("custom");
   $("account-host").focus();
@@ -994,7 +1108,7 @@ $("use-custom-imap").addEventListener("click", () => {
 $("account-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (state.pendingDiscard) { $("keep-account").focus(); return; }
-  if (state.accountBusy || !validateForm(event.currentTarget)) return;
+  if (state.accountBusy || routeMailboxAddress() || !validateForm(event.currentTarget)) return;
   const form = event.currentTarget; const button = form.querySelector('[type="submit"]');
   state.accountBusy = true; setBusy(button, true); $("provider-select").disabled = true;
   $("account-fields").disabled = true; $("close-account").disabled = true;
@@ -1016,25 +1130,31 @@ $("account-form").addEventListener("submit", async (event) => {
     $("account-fields").disabled = false; $("close-account").disabled = false;
   }
   state.accountDirty = false; form.reset(); closeDialog($("account-dialog"));
-  notify("已連接郵箱，正在準備同步。");
+  notify(t("已連接郵箱，正在準備同步。"));
   await loadAccounts(); await loadSetup(); if (state.page === "inbox") await loadMessages();
 });
-$("start-oauth").addEventListener("click", async () => {
-  const button = $("start-oauth"); if (button.disabled) return;
+async function startProviderLogin(providerId, button, errorTarget) {
+  if (button.disabled || state.oauthStart || state.settingsDirty || state.settingsBusy || state.page !== "settings") return;
   const controller = new AbortController();
-  state.oauthStart = controller;
-  setBusy(button, true); $("oauth-error").textContent = "";
+  state.oauthStart = {controller, button};
+  setBusy(button, true);
+  refreshSettingsLoginButtons();
+  errorTarget.textContent = "";
   try {
-    const { url } = await api(`/api/oauth/${encodeURIComponent(state.selectedProvider)}/start`, { method: "POST", signal: controller.signal });
-    if (controller.signal.aborted || !state.authenticated) return;
-    if (!safeURL(url)) throw new Error("授權網址無效，請檢查伺服器設定。");
+    const { url } = await api(`/api/oauth/${encodeURIComponent(providerId)}/start`, { method: "POST", signal: controller.signal });
+    if (controller.signal.aborted || !state.authenticated || location.hash !== "#settings") return;
+    if (!safeURL(url)) throw new Error(t("授權網址無效，請檢查伺服器設定。"));
     location.assign(url);
   } catch (error) {
-    if (!controller.signal.aborted) { $("oauth-error").textContent = errorText(error); setBusy(button, false); }
+    if (!controller.signal.aborted) errorTarget.textContent = errorText(error);
   } finally {
-    if (state.oauthStart === controller) state.oauthStart = null;
+    if (state.oauthStart?.controller === controller) {
+      state.oauthStart = null;
+      setBusy(button, false);
+      refreshSettingsLoginButtons();
+    }
   }
-});
+}
 $("confirm-cancel").addEventListener("click", () => { if (!$("confirm-action").disabled) closeDialog($("confirm-dialog")); });
 $("confirm-dialog").addEventListener("cancel", (event) => { event.preventDefault(); if (!$("confirm-action").disabled) closeDialog($("confirm-dialog")); });
 $("confirm-action").addEventListener("click", async () => {
@@ -1052,7 +1172,7 @@ $("token-form").addEventListener("submit", async (event) => {
     const result = await api("/api/tokens", { method: "POST", body: { name: $("token-name").value.trim() } });
     if (!state.authenticated) return;
     $("token-name").value = ""; $("new-token").value = result.token; $("new-token").type = "password";
-    const reveal = document.querySelector('[data-reveal="new-token"]'); reveal.textContent = "顯示"; reveal.setAttribute("aria-pressed", "false"); reveal.setAttribute("aria-label", "顯示存取金鑰");
+    const reveal = document.querySelector('[data-reveal="new-token"]'); reveal.textContent = t("顯示"); reveal.setAttribute("aria-pressed", "false"); reveal.setAttribute("aria-label", t("顯示存取金鑰"));
     state.oneTimeSecret = true; $("copy-token-status").textContent = "";
     openDialog($("secret-dialog"), $("copy-token")); await loadTokens(); await loadSetup();
   } catch (error) { $("token-error").textContent = errorText(error); if (error.uncertain) await loadTokens(); }
@@ -1066,13 +1186,25 @@ $("copy-endpoint").addEventListener("click", () => void copyText($("endpoint").v
 $("copy-config").addEventListener("click", () => void copyText($("codex-config").textContent));
 $("ai-client").addEventListener("change", updateConnectionConfig);
 $("ai-auth").addEventListener("change", updateConnectionConfig);
+for (const category of settingsCategories) {
+  $("category-" + category).addEventListener("click", () => selectSettingsCategory(category));
+}
+$("open-mcp-guide").addEventListener("click", (event) => {
+  event.preventDefault();
+  navigateToSettings("mcp", "guide-title");
+});
+for (const service of ["google", "microsoft"]) {
+  $("select-" + service).addEventListener("click", () => selectSettingsProvider(service));
+  $(service + "-login").addEventListener("click", () =>
+    startProviderLogin(service === "google" ? "gmail" : "microsoft", $(service + "-login"), $(service + "-login-error")));
+}
 $("settings-form").addEventListener("input", markSettingsDirty);
 $("settings-form").addEventListener("change", markSettingsDirty);
 $("settings-form").addEventListener("submit", saveSettings);
 $("retry-settings").addEventListener("click", () => void loadSettings());
 $("discard-settings").addEventListener("click", () => {
   if (state.settingsBusy) return;
-  if (state.settingsDirty) askConfirmation("捨棄未儲存的設定？", "這會清除本機表單中的變更，並重新讀取伺服器已儲存的設定。", "捨棄並重新載入", async () => { discardSettings(); await loadSettings(); });
+  if (state.settingsDirty) askConfirmation(t("捨棄未儲存的設定？"), t("這會清除本機表單中的變更，並重新讀取伺服器已儲存的設定。"), t("捨棄並重新載入"), async () => { discardSettings(); await loadSettings(); });
   else void loadSettings();
 });
 $("run-diagnostics").addEventListener("click", () => void runDiagnostics());
@@ -1093,7 +1225,6 @@ for (const provider of ["google", "microsoft"]) {
     markSettingsDirty();
   });
 }
-$("open-oauth-settings").addEventListener("click", () => { closeDialog($("account-dialog")); location.hash = "settings"; });
 // Controls stay disabled until their handlers are bound (also safe when JS fails).
 for (const button of document.querySelectorAll("[data-js-control]")) button.disabled = false;
 // IME confirmation must never accidentally submit credential/token forms.
@@ -1107,7 +1238,7 @@ window.addEventListener("beforeunload", (event) => {
   if (state.accountDirty || state.oneTimeSecret || state.settingsDirty) { event.preventDefault(); event.returnValue = ""; }
 });
 window.addEventListener("online", () => { if (state.authenticated) { void loadAccounts(); if (state.page === "inbox") void loadMessages(); } });
-window.addEventListener("offline", () => { $("network-banner").textContent = "目前離線。顯示的是上次取得的資料，操作不會排入離線佇列。"; $("network-banner").hidden = false; });
+window.addEventListener("offline", () => { $("network-banner").textContent = t("目前離線。顯示的是上次取得的資料，操作不會排入離線佇列。"); $("network-banner").hidden = false; });
 document.addEventListener("visibilitychange", () => { if (!document.hidden && state.authenticated) { void loadAccounts(); if (state.page === "connect") { void loadTokens(); void loadGrants(); } } });
 setInterval(async () => {
   if (!state.authenticated || document.hidden || state.pollBusy || $("confirm-dialog").open) return;
@@ -1115,11 +1246,40 @@ setInterval(async () => {
   try { await loadAccounts(); } finally { state.pollBusy = false; }
 }, 10000);
 
+function refreshInterfaceLanguage(previous) {
+  translateFeedback(previous);
+  for (const button of document.querySelectorAll("[data-reveal]")) {
+    const shown = $(button.dataset.reveal).type !== "password";
+    button.textContent = shown ? t("隱藏") : t("顯示");
+    if (shown) button.setAttribute("aria-label", button.dataset.reveal === "new-token" ? t("隱藏存取金鑰") : t("隱藏密碼"));
+  }
+  if (!state.authenticated) {
+    document.title = t("登入 · MailHarbor");
+    return;
+  }
+  // Only the login and settings pages expose a language selector. Keep unsaved form values intact.
+  document.title = t("設定") + " · MailHarbor";
+  updateConnectionConfig();
+  renderProviders();
+  renderAccounts();
+  updateCoverage();
+  if (state.settings) {
+    for (const service of ["google", "microsoft"]) {
+      $(service + "-configured").textContent = state.settings[service].secret_configured ? t("已儲存 Secret") : t("尚未設定 Secret");
+    }
+    $("settings-dirty").textContent = state.settingsDirty ? t("有尚未儲存的變更。") : t("尚未變更設定。");
+    refreshSettingsLoginButtons();
+  }
+  if (state.diagnostics) renderDiagnostics(state.diagnostics);
+  void loadAccounts();
+  void loadSetup();
+}
 async function boot() {
+  bindLanguageControls(refreshInterfaceLanguage);
   const params = new URLSearchParams(location.search);
   state.oauthRequest = params.get("oauth_request") || "";
   if (params.has("connected") || params.has("connection_error")) {
-    $("callback-banner").textContent = params.has("connected") ? "郵箱授權完成。可在「我的郵箱」查看同步狀態。" : "郵箱授權未完成。請檢查服務商設定後重新連接。";
+    $("callback-banner").textContent = params.has("connected") ? t("郵箱授權完成。可在「我的郵箱」查看同步狀態。") : t("郵箱授權未完成。請檢查服務商設定後重新連接。");
     $("callback-banner").className = "banner" + (params.has("connection_error") ? " error" : "");
     $("callback-banner").hidden = false;
     params.delete("connected"); params.delete("connection_error");

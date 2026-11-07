@@ -108,11 +108,17 @@ class Store:
     def save_account(self, provider, identity, credentials, label=""):
         folder = credentials.get("folder", "INBOX")
         with self.db() as db:
-            previous = db.execute("SELECT id FROM accounts WHERE provider=? AND provider_uid=? AND folder=?",
+            previous = db.execute("SELECT id,credentials FROM accounts WHERE provider=? AND provider_uid=? AND folder=?",
                                   (provider, identity["provider_uid"], folder)).fetchone()
+            if provider in ("gmail", "microsoft") and not credentials.get("refresh_token"):
+                stored = self.decrypt(previous["credentials"]) if previous else {}
+                if (not stored.get("refresh_token") or not credentials.get("client_id")
+                        or stored.get("client_id") != credentials["client_id"]):
+                    raise ValueError("未取得背景同步授權，請重新授權此郵箱。")
+                credentials = {**credentials, "refresh_token": stored["refresh_token"]}
             if not previous and db.execute("SELECT COUNT(*) FROM accounts").fetchone()[0] >= 50:
                 raise ValueError("此個人服務最多連接 50 個郵箱；現有帳號仍可重新授權。")
-            account_id = previous[0] if previous else secrets.token_hex(12)
+            account_id = previous["id"] if previous else secrets.token_hex(12)
             db.execute("""INSERT INTO accounts(id,provider,provider_uid,email,label,credentials,folder)
                 VALUES(?,?,?,?,?,?,?) ON CONFLICT(provider,provider_uid,folder) DO UPDATE SET
                 email=excluded.email,label=excluded.label,credentials=excluded.credentials,

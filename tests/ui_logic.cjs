@@ -5,7 +5,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 const root = path.resolve(__dirname, "..");
 const html = fs.readFileSync(path.join(root, "mailhub/static/index.html"), "utf8");
-const source = fs.readFileSync(path.join(root, "mailhub/static/app.js"), "utf8").replace("void boot();", "globalThis.testBoot = boot;");
+const source = ["translations.js", "i18n.js", "app.js"].map((name) => fs.readFileSync(path.join(root, "mailhub/static", name), "utf8")).join("\n").replace("void boot();", "globalThis.testBoot = boot;");
 
 class Element {
   constructor(tag = "div") {
@@ -31,6 +31,7 @@ const elements = Object.fromEntries([...html.matchAll(/id="([\w-]+)"/g)].map((ma
 elements["ai-client"].value = "codex";
 elements["ai-auth"].value = "oauth";
 const document = {
+  documentElement: { lang: "zh-Hant" }, createTreeWalker: () => ({ nextNode: () => false }),
   hidden: false, title: "", activeElement: new Element("button"),
   getElementById: (id) => elements[id],
   createElement: (tag) => new Element(tag),
@@ -44,6 +45,7 @@ let calls = [];
 let assigned = [];
 let deferredToken = null;
 let deferredOAuth = null;
+let deferredSettingsRead = null;
 let grantRows = [{ id: "grant-1", client_name: "Test AI", created_at: "2026-10-29T08:00:00Z", last_used_at: null }];
 const settings = { public_url: "https://mail.example.test", sync_interval_seconds: 300, sync_days: 30, sync_limit: 200,
   google: { client_id: "google-test-id", secret_configured: true, redirect_uri: "https://mail.example.test/api/oauth/gmail/callback" },
@@ -52,7 +54,7 @@ const settings = { public_url: "https://mail.example.test", sync_interval_second
 const account = { id: "a1", provider: "icloud", email: "example@example.test", label: "測試郵箱", status: "ready", last_sync: "2026-10-29T08:00:00Z", message_count: 1, folder: "INBOX" };
 const message = { id: "m1", account_id: "a1", account_email: account.email, provider: "icloud", subject: "<script>bad()</script>", sender: "Test", recipients: "User", received_at: "2026-10-29T08:00:00Z", snippet: "test", body: "<img src=x onerror=bad()>", body_truncated: true, attachments: [] };
 const context = vm.createContext({
-  document, window: { addEventListener() {} }, console, URL, URLSearchParams, Intl, AbortController,
+  document, NodeFilter: { SHOW_TEXT: 4 }, window: { addEventListener() {} }, console, URL, URLSearchParams, Intl, AbortController,
   location: { hash: "#inbox", search: "", pathname: "/", origin: "https://mail.example.test", assign(url) { assigned.push(url); } },
   history: { replaceState() {} }, navigator: { clipboard: { async writeText() {} } },
   Option: class extends Element { constructor(text, value) { super("option"); this.textContent = text; this.value = value; } },
@@ -64,6 +66,7 @@ const context = vm.createContext({
     if (messagesForbidden && pathname === "/api/messages") return { ok: false, status: 403, json: async () => ({ detail: "拒絕存取" }) };
     if (pathname === "/api/tokens" && options.method === "POST" && deferredToken) return deferredToken;
     if (pathname === "/api/oauth/gmail/start" && deferredOAuth) return deferredOAuth;
+    if (pathname === "/api/settings" && options.method === "GET" && deferredSettingsRead) return deferredSettingsRead;
     if (pathname === "/api/settings" && options.method === "POST") {
       const body = JSON.parse(options.body);
       settings.sync_interval_seconds = body.sync_interval_seconds; settings.sync_days = body.sync_days; settings.sync_limit = body.sync_limit;
@@ -95,6 +98,14 @@ function flatten(element) { return String(element.textContent || "") + element.c
 
 (async () => {
   vm.runInContext(source, context);
+  const catalog = vm.runInContext("translations", context);
+  const supported = vm.runInContext("Object.keys(languageNames)", context);
+  for (const [key, row] of Object.entries(catalog)) {
+    for (const lang of supported.filter((value) => value !== "zh-TW")) {
+      assert.ok(row[lang]?.trim(), `Missing ${lang} translation: ${key}`);
+      assert.deepEqual((row[lang].match(/\{\d+\}/g) || []).sort(), (key.match(/\{\d+\}/g) || []).sort(), `Broken ${lang} placeholders: ${key}`);
+    }
+  }
   await context.testBoot();
   await vm.runInContext("loadMessages()", context);
   assert.equal(elements["app-view"].hidden, false);
@@ -105,21 +116,34 @@ function flatten(element) { return String(element.textContent || "") + element.c
   assert.match(elements["codex-config"].textContent, /MAILHUB_MCP_TOKEN/);
   assert.equal(elements["account-host"].readOnly, true);
   vm.runInContext('state.providers.push({id:"gmail", name:"Gmail", kind:"oauth", configured:true})', context);
-  for (const cancel of ["closeAccount()", 'changeProvider("icloud")']) {
-    vm.runInContext('openAccount(); changeProvider("gmail")', context);
+  vm.runInContext('openAccount(); changeProvider("gmail")', context);
+  assert.equal(elements["account-dialog"].open, false, "Selecting Gmail opens its settings directly");
+  assert.equal(elements["group-accounts"].hidden, false);
+  assert.equal(elements["google-settings"].hidden, false);
+  assert(!calls.some((call) => call.url.startsWith("/api/oauth/gmail/start")), "Routing must not grant access");
+  // This in-memory location double has no native hashchange event.
+  vm.runInContext('location.hash = "#settings"; choosePage()', context);
+  await vm.runInContext("loadSettings()", context);
+  for (const cancel of ['selectSettingsCategory("mcp")', 'selectSettingsProvider("microsoft")', 'markSettingsDirty()', 'location.hash = "#accounts"; choosePage()']) {
+    vm.runInContext('location.hash = "#settings"; choosePage(); selectSettingsCategory("accounts"); selectSettingsProvider("google")', context);
+    await vm.runInContext("loadSettings()", context);
     let resolveOAuth;
     deferredOAuth = new Promise((resolve) => { resolveOAuth = resolve; });
-    const pendingOAuth = elements["start-oauth"].listeners.click();
+    const pendingOAuth = elements["google-login"].listeners.click();
+    assert.equal(elements["google-login"].disabled, true);
     vm.runInContext(cancel, context);
     resolveOAuth({ok: true, json: async () => ({url:"https://oauth.example.test/old-request"})});
     await pendingOAuth;
+    vm.runInContext("discardSettings()", context);
     assert.equal(assigned.length, 0, "An abandoned OAuth start must not redirect");
   }
-  vm.runInContext('closeAccount(); openAccount(); changeProvider("gmail")', context);
+  vm.runInContext('location.hash = "#settings"; choosePage(); selectSettingsCategory("accounts"); selectSettingsProvider("google")', context);
+  await vm.runInContext("loadSettings()", context);
   deferredOAuth = Promise.resolve({ok: true, json: async () => ({url:"https://oauth.example.test/current-request"})});
-  await elements["start-oauth"].listeners.click();
+  await elements["google-login"].listeners.click();
   assert.deepEqual(assigned, ["https://oauth.example.test/current-request"]);
-  vm.runInContext('closeAccount()', context);
+  vm.runInContext('location.hash = "#inbox"; choosePage()', context);
+  await vm.runInContext("loadMessages()", context);
   assert.match(elements["coverage"].textContent, /^同步目標：/);
   assert.match(flatten(elements["accounts-list"]), /天數未記錄/);
   assert.match(flatten(elements["mail-list"]), /<script>bad\(\)<\/script>/);
@@ -149,6 +173,10 @@ function flatten(element) { return String(element.textContent || "") + element.c
   assert.equal(cleared.clear_google_secret, true);
   assert.equal(Object.hasOwn(cleared, "google_client_secret"), false);
   elements["clear-google-secret"].checked = false;
+  const previousSettings = structuredClone(settings);
+  let returnPreviousSettings;
+  deferredSettingsRead = new Promise((resolve) => { returnPreviousSettings = resolve; });
+  const oldReload = vm.runInContext("loadSettings()", context);
   elements["google-client-secret"].value = "never-export-this-secret";
   elements["sync-days"].value = "90";
   await vm.runInContext("saveSettings({preventDefault(){}})", context);
@@ -157,6 +185,11 @@ function flatten(element) { return String(element.textContent || "") + element.c
   assert.equal(JSON.parse(saved.options.body).sync_days, 90);
   assert.equal(elements["google-client-secret"].value, "", "Secret clears after successful save");
   assert.equal(vm.runInContext("state.settingsDirty", context), false);
+  returnPreviousSettings({ ok: true, json: async () => previousSettings });
+  await oldReload;
+  deferredSettingsRead = null;
+  assert.equal(elements["sync-days"].value, "90", "A late reload must not replace the saved settings");
+  assert.equal(elements["google-login"].disabled, false);
   for (const client of ["codex", "cursor", "claude", "rest", "oauth"]) {
     elements["ai-client"].value = client;
     vm.runInContext("updateConnectionConfig()", context);
@@ -223,5 +256,19 @@ function flatten(element) { return String(element.textContent || "") + element.c
   await pending;
   assert.equal(elements["new-token"].value, "");
   assert.equal(elements["secret-dialog"].open, false);
+  // Message content and owner-entered labels can be identical to interface copy.
+  vm.runInContext('applyLanguage("fr")', context);
+  message.subject = "設定";
+  message.sender = "我的郵箱";
+  account.label = "介面語言";
+  context.localizedMail = message;
+  context.localizedAccount = account;
+  vm.runInContext("state.accounts = [localizedAccount]; renderAccounts(); renderMessages([localizedMail]);", context);
+  assert.match(flatten(elements["accounts-list"]), /介面語言/);
+  assert.match(flatten(elements["mail-list"]), /設定/);
+  assert.match(flatten(elements["mail-list"]), /我的郵箱/);
+  assert.equal(vm.runInContext('t("設定")', context), "Paramètres");
+  assert.equal(vm.runInContext('numberFormat.resolvedOptions().locale', context), "fr");
+  assert.equal(vm.runInContext('dateFormat.resolvedOptions().timeZone', context), "Europe/Belgrade");
   console.log("UI logic harness: passed (mail rendering, settings/secret rules, client configs, consent/revoke, CSRF, 401/403 and late-secret race)");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

@@ -1,5 +1,11 @@
 # UI verification evidence
 
+## 2026-11-07 mailbox, language and settings changes
+
+The local Chrome smoke used the HTTP fixture and synthetic mail. It exercised direct Gmail and Outlook settings navigation from the provider selector and from a typed address, IMAP draft preservation, settings validation across categories, the MCP guide and its four tool names, language switching before and after login, preference persistence and unchanged message content. It checked navigation controls for overlap at 320, 390, 640, 780 and 1024 pixels, including a 360-pixel-high desktop viewport. The stdio bridge listed the tools, searched the fixture and read a result.
+
+The browser opened all seven language options. A separate layout check inspected the French settings at widths from 320 to 1440 pixels. The UI logic test checks catalog entries and interpolation parameters for each language, cancellation of abandoned OAuth starts, and delayed reads after a settings save. Provider integration tests completed two Gmail and two Microsoft grants in reverse order using simulated provider responses. No real mailbox credentials were used.
+
 The UI is a buildless vanilla JavaScript application. No bundled browser framework or node dependencies are required.
 
 Automated project commands:

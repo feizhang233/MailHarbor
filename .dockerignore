@@ -7,6 +7,8 @@
 !mailhub/providers.py
 !mailhub/static/app.css
 !mailhub/static/app.js
+!mailhub/static/i18n.js
+!mailhub/static/translations.js
 !mailhub/static/index.html
 !mailhub/static/tokens.css
 !mailhub/stdio_bridge.py

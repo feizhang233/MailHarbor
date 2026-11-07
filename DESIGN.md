@@ -29,7 +29,7 @@
 
 MailHarbor is a private, single-owner mailbox control room. Its purpose is to let the owner connect many mailboxes, inspect the synchronized messages, and grant read-only access to Codex. The physical reference is a harbor dispatch board: a quiet persistent navigation rail, account labels beside each message, explicit timestamps, and green connection states. The memorable signature is the compact mailbox routing strip above the inbox, showing the actual scope of synchronized mail.
 
-This is a product interface, not a marketing page. The audience uses desktop and phone, with Traditional Chinese interface copy and arbitrary multilingual email content. Europe/Belgrade is the displayed timestamp timezone. No Japan-market business scope is implied. The evidence is CONTRACT.md and the user's multi-mailbox/VPS request. Avoid oversized dashboards, fictional statistics, decorative maritime images, and cards that conceal synchronization failures.
+This is a product interface, not a marketing page. The audience uses desktop and phone, with a selectable interface language and arbitrary multilingual email content. Europe/Belgrade is the displayed timestamp timezone. No Japan-market business scope is implied. The evidence is CONTRACT.md and the user's multi-mailbox/VPS request. Avoid oversized dashboards, fictional statistics, decorative maritime images, and cards that conceal synchronization failures.
 
 Token ownership is Model A: this frontmatter is the source; `scripts/generate_ui_tokens.py` produces `mailhub/static/tokens.css`. Components consume those custom properties. `--color-*`, `--font-*`, `--text-*`, `--leading-*`, `--radius-*`, and `--space-*` directly map to the corresponding frontmatter paths. Do not edit the generated file. `--check` detects drift.
 
@@ -43,7 +43,7 @@ System body fonts avoid external requests and font swaps and cover Traditional C
 
 ## Layout
 
-Desktop has a 224px navigation rail and fluid content with a maximum 88rem width. The mail list uses a stable five-row minimum footprint and 30-item server pagination. Each mail row has sender, subject/snippet, mailbox, and time; small screens reflow these into two columns without removing data. At 760px the rail becomes a compact top navigation. Forms and account/token screens scroll in the document; only dialogs and the mail list have bounded local scrolling. Avoid application-wide fixed-height overflow traps.
+Desktop has a 224px navigation rail and fluid content with a maximum 88rem width. The mail list uses a stable five-row minimum footprint and 30-item server pagination. Each mail row has sender, subject/snippet, mailbox, and time; small screens reflow these into two columns without removing data. At 760px the rail becomes a top navigation with the wordmark and logout in separate grid cells. At 480px and below the destinations use two columns. A short desktop viewport scrolls the rail independently so logout stays reachable. Forms and account/token screens scroll in the document; only dialogs and the mail list have bounded local scrolling. Avoid application-wide fixed-height overflow traps.
 
 ## Elevation & Depth
 
@@ -63,7 +63,7 @@ The settings page reuses the same panel, field, confirmation, and copy controls.
 
 Dialogs use `<dialog>.showModal()` with labeled titles, scrollable bodies, Escape behavior, and restoration of trigger focus. Destructive actions initially focus Cancel. One shared status region provides polite acknowledgements; persistent errors remain inline. Native dialogs, external assets, hidden message tracking images, and HTML rendering are excluded.
 
-Motion is limited to a 120ms color transition and an indeterminate spinner. Reduced-motion disables animation. Dynamic content reserves empty/loading space. The language is direct: 連接郵箱、同步、斷開連接、建立存取金鑰、撤銷金鑰. Display dates with `zh-TW`, `Europe/Belgrade`, and visible timezone text.
+Motion is limited to a 120ms color transition and an indeterminate spinner. Reduced-motion disables animation. Dynamic content reserves empty/loading space. The language is direct: 連接郵箱、同步、斷開連接、建立存取金鑰、撤銷金鑰. Format dates and numbers using the selected interface language and display the Europe/Belgrade timezone.
 
 ## Do's and Don'ts
 
