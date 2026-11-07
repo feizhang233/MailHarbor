@@ -7,7 +7,7 @@ const state = {
   page: "inbox", query: "", accountId: "", offset: 0, limit: 30, total: 0,
   searchEpoch: 0, accountEpoch: 0, tokenEpoch: 0, readerEpoch: 0,
   searchController: null, readerController: null, searchTimer: null, composing: false,
-  accountDirty: false, accountBusy: false, pendingDiscard: null, selectedProvider: "",
+  accountDirty: false, accountBusy: false, pendingDiscard: null, selectedProvider: "", oauthStart: null,
   oneTimeSecret: false, confirmTask: null, triggerMap: new WeakMap(), liveTimer: null,
   pollBusy: false, lastSyncSignature: "", lastAccountRenderSignature: "", requests: new Set(),
   settings: null, settingsDirty: false, settingsBusy: false, settingsEpoch: 0, setupEpoch: 0,
@@ -86,15 +86,16 @@ function validateForm(form) {
   }
   return !first;
 }
+function clearSecret(id) {
+  $(id).value = "";
+  $(id).type = "password";
+  const button = document.querySelector(`[data-reveal="${id}"]`);
+  button.textContent = "顯示";
+  button.setAttribute("aria-pressed", "false");
+  button.setAttribute("aria-label", "顯示" + (id === "new-token" ? "存取金鑰" : "密碼"));
+}
 function resetSecrets() {
-  for (const id of ["login-password", "account-password", "new-token", "google-client-secret", "microsoft-client-secret"]) {
-    $(id).value = "";
-    $(id).type = "password";
-    const button = document.querySelector(`[data-reveal="${id}"]`);
-    button.textContent = "顯示";
-    button.setAttribute("aria-pressed", "false");
-    button.setAttribute("aria-label", "顯示" + (id === "new-token" ? "存取金鑰" : "密碼"));
-  }
+  for (const id of ["login-password", "account-password", "new-token", "google-client-secret", "microsoft-client-secret"]) clearSecret(id);
   state.oneTimeSecret = false;
 }
 function openDialog(dialog, focusTarget) {
@@ -103,6 +104,7 @@ function openDialog(dialog, focusTarget) {
   (focusTarget || dialog.querySelector("button, input, select"))?.focus();
 }
 function closeDialog(dialog) {
+  if (dialog === $("account-dialog")) cancelOAuthStart();
   if (dialog.open) dialog.close();
   const trigger = state.triggerMap.get(dialog);
   if (trigger?.isConnected && !trigger.disabled) trigger.focus();
@@ -115,6 +117,7 @@ function expireSession(message = "登入已逾時，請重新登入。") {
   state.accountEpoch += 1;
   state.tokenEpoch += 1;
   state.readerEpoch += 1;
+  cancelOAuthStart();
   clearTimeout(state.searchTimer);
   for (const controller of state.requests) controller.abort();
   for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();
@@ -165,17 +168,22 @@ async function api(path, options = {}) {
       body: options.body === undefined ? undefined : JSON.stringify(options.body), signal: controller.signal,
     });
     let data;
-    try { data = await response.json(); } catch { data = {}; }
+    try { data = await response.json(); } catch { data = null; }
     if (csrfAtDispatch && !["/api/login", "/api/session"].includes(path) && state.csrf !== csrfAtDispatch) {
       const stale = new Error("登入狀態已變更，忽略舊要求的回應。"); stale.name = "AbortError"; throw stale;
     }
     if (!response.ok) {
       if (response.status === 401 && path !== "/api/login") expireSession();
       const defaultMessage = response.status === 403 ? "沒有權限完成這項操作，請重新登入後重試。" : "無法完成要求，請稍後重試。";
-      const detail = typeof data.detail === "string" ? data.detail : defaultMessage;
+      const detail = typeof data?.detail === "string" ? data.detail : defaultMessage;
       const error = new Error(detail);
       error.status = response.status;
       throw error;
+    }
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      const invalid = new Error(method === "GET" ? "伺服器回應格式無效，請重新整理。" : "伺服器回應格式無效，操作結果尚未確認。請先重新整理列表確認。");
+      invalid.uncertain = method !== "GET";
+      throw invalid;
     }
     $("network-banner").hidden = true;
     return data;
@@ -541,12 +549,29 @@ function closeReader() {
   $("reader-content").replaceChildren();
 }
 function renderProviders() {
+  const current = state.providers.find((provider) => provider.id === state.selectedProvider);
   const select = $("provider-select"); select.replaceChildren();
   for (const provider of state.providers) select.add(new Option(provider.name, provider.id));
-  if (state.providers.length) { state.selectedProvider = state.providers[0].id; configureProvider(); }
+  if ($("account-dialog").open) {
+    if (current) {
+      select.value = current.id;
+      if (current.kind === "imap") return; // A settings refresh must preserve the active IMAP draft.
+    } else {
+      $("account-form").reset();
+      clearSecret("account-password");
+      state.accountDirty = false;
+    }
+  }
+  configureProvider();
+}
+function cancelOAuthStart() {
+  state.oauthStart?.abort();
+  state.oauthStart = null;
+  $("start-oauth").setAttribute("aria-busy", "false");
 }
 function configureProvider() {
   const provider = state.providers.find((item) => item.id === $("provider-select").value);
+  if (provider?.id !== state.selectedProvider || !provider?.configured) cancelOAuthStart();
   state.selectedProvider = provider?.id || "";
   $("account-form").hidden = provider?.kind !== "imap";
   $("oauth-pane").hidden = provider?.kind !== "oauth";
@@ -557,11 +582,13 @@ function configureProvider() {
   if (guide) $("provider-guide").href = guide;
   $("account-host").value = provider?.host || "";
   $("account-host").readOnly = Boolean(provider?.host);
+  $("use-custom-imap").hidden = !provider?.host || !state.providers.some((item) => item.id === "custom");
   $("account-port").value = String(provider?.port || 993);
   $("advanced-settings").open = provider?.id === "custom";
+  clearValidation($("account-form"));
   $("account-error").textContent = "";
   $("oauth-error").textContent = "";
-  $("start-oauth").disabled = !provider?.configured;
+  $("start-oauth").disabled = Boolean(state.oauthStart) || !provider?.configured;
   $("open-oauth-settings").hidden = Boolean(provider?.configured);
   $("start-oauth").textContent = `登入 ${provider?.name || "郵箱"} 並授權`;
   $("oauth-state").textContent = provider?.configured ? "前往服務商的登入頁面，可選擇或新增另一個帳號。授權完成後會回到這裡。" : "伺服器尚未設定此服務的 OAuth 應用。請先依部署說明填入 Client ID、Client Secret 和回呼網址。";
@@ -570,12 +597,29 @@ function configureProvider() {
 }
 function openAccount() {
   if (!state.providers.length) { notify("郵箱服務清單尚未載入，請重新整理頁面。"); return; }
-  $("account-form").reset(); clearValidation($("account-form"));
+  $("account-form").reset();
+  clearSecret("account-password");
   state.accountDirty = false; state.accountBusy = false; state.pendingDiscard = null;
-  $("discard-account").hidden = true; $("account-password").type = "password";
-  const reveal = document.querySelector('[data-reveal="account-password"]'); reveal.textContent = "顯示"; reveal.setAttribute("aria-pressed", "false");
+  $("discard-account").hidden = true;
+  $("provider-select").value = (state.providers.find((item) => item.id === "custom") || state.providers[0]).id;
   configureProvider();
   openDialog($("account-dialog"), $("provider-select"));
+}
+function changeProvider(nextId) {
+  const select = $("provider-select");
+  const current = state.providers.find((item) => item.id === state.selectedProvider);
+  const next = state.providers.find((item) => item.id === nextId);
+  if (current?.kind === "imap" && next?.kind === "imap") {
+    clearSecret("account-password");
+    state.pendingDiscard = null;
+    $("discard-account").hidden = true;
+    state.accountDirty = ["account-email", "account-label", "account-username", "account-folder"].some((id) => $(id).value !== $(id).defaultValue);
+    select.value = nextId;
+    configureProvider();
+    return;
+  }
+  select.value = state.selectedProvider;
+  guardDiscard(() => { clearSecret("account-password"); select.value = nextId; configureProvider(); });
 }
 function guardDiscard(action) {
   if (state.accountBusy) return;
@@ -942,17 +986,18 @@ $("discard-account-confirm").addEventListener("click", () => {
   const action = state.pendingDiscard; state.pendingDiscard = null; state.accountDirty = false;
   $("account-form").reset(); $("discard-account").hidden = true; action?.();
 });
-$("provider-select").addEventListener("change", () => {
-  const next = $("provider-select").value;
-  if (state.accountDirty) {
-    $("provider-select").value = state.selectedProvider;
-    guardDiscard(() => { $("provider-select").value = next; configureProvider(); });
-  } else configureProvider();
+$("provider-select").addEventListener("change", () => changeProvider($("provider-select").value));
+$("use-custom-imap").addEventListener("click", () => {
+  changeProvider("custom");
+  $("account-host").focus();
 });
 $("account-form").addEventListener("submit", async (event) => {
-  event.preventDefault(); if (state.accountBusy || !validateForm(event.currentTarget)) return;
+  event.preventDefault();
+  if (state.pendingDiscard) { $("keep-account").focus(); return; }
+  if (state.accountBusy || !validateForm(event.currentTarget)) return;
   const form = event.currentTarget; const button = form.querySelector('[type="submit"]');
   state.accountBusy = true; setBusy(button, true); $("provider-select").disabled = true;
+  $("account-fields").disabled = true; $("close-account").disabled = true;
   $("account-error").textContent = "";
   const body = {
     provider: state.selectedProvider, email: $("account-email").value.trim(), label: $("account-label").value.trim(),
@@ -962,21 +1007,33 @@ $("account-form").addEventListener("submit", async (event) => {
   try {
     await api("/api/accounts/imap", { method: "POST", body, timeout: 90000 });
     if (!state.authenticated) return;
-    state.accountDirty = false; form.reset(); closeDialog($("account-dialog"));
-    await loadAccounts(); await loadSetup(); if (state.page === "inbox") await loadMessages();
-    notify("已連接郵箱，正在準備同步。");
-  } catch (error) { $("account-error").textContent = errorText(error); if (error.uncertain) await loadAccounts(); }
-  finally { state.accountBusy = false; setBusy(button, false); $("provider-select").disabled = false; }
+  } catch (error) {
+    $("account-error").textContent = errorText(error);
+    if (error.uncertain) void loadAccounts();
+    return;
+  } finally {
+    state.accountBusy = false; setBusy(button, false); $("provider-select").disabled = false;
+    $("account-fields").disabled = false; $("close-account").disabled = false;
+  }
+  state.accountDirty = false; form.reset(); closeDialog($("account-dialog"));
+  notify("已連接郵箱，正在準備同步。");
+  await loadAccounts(); await loadSetup(); if (state.page === "inbox") await loadMessages();
 });
 $("start-oauth").addEventListener("click", async () => {
   const button = $("start-oauth"); if (button.disabled) return;
+  const controller = new AbortController();
+  state.oauthStart = controller;
   setBusy(button, true); $("oauth-error").textContent = "";
   try {
-    const { url } = await api(`/api/oauth/${encodeURIComponent(state.selectedProvider)}/start`, { method: "POST" });
-    if (!state.authenticated) return;
+    const { url } = await api(`/api/oauth/${encodeURIComponent(state.selectedProvider)}/start`, { method: "POST", signal: controller.signal });
+    if (controller.signal.aborted || !state.authenticated) return;
     if (!safeURL(url)) throw new Error("授權網址無效，請檢查伺服器設定。");
     location.assign(url);
-  } catch (error) { $("oauth-error").textContent = errorText(error); setBusy(button, false); }
+  } catch (error) {
+    if (!controller.signal.aborted) { $("oauth-error").textContent = errorText(error); setBusy(button, false); }
+  } finally {
+    if (state.oauthStart === controller) state.oauthStart = null;
+  }
 });
 $("confirm-cancel").addEventListener("click", () => { if (!$("confirm-action").disabled) closeDialog($("confirm-dialog")); });
 $("confirm-dialog").addEventListener("cancel", (event) => { event.preventDefault(); if (!$("confirm-action").disabled) closeDialog($("confirm-dialog")); });

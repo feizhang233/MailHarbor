@@ -316,8 +316,11 @@ def _gmail_body(payload, depth=0, status=None):
     filename = payload.get("filename", "")
     mime = payload.get("mimeType", "")
     body = payload.get("body", {})
-    if filename or (mime not in ("text/plain", "text/html") and not mime.startswith("multipart/")):
-        if filename or body.get("attachmentId"):
+    disposition = next((header.get("value") for header in payload.get("headers", []) if isinstance(header, dict)
+                        and str(header.get("name", "")).lower() == "content-disposition"), "")
+    is_attachment = bool(filename) or str(disposition).partition(";")[0].strip().lower() == "attachment"
+    if is_attachment or (mime not in ("text/plain", "text/html") and not mime.startswith("multipart/")):
+        if is_attachment or body.get("attachmentId"):
             attachments.append({"filename": _decode_header(filename) or "attachment", "content_type": _clean(mime, 120), "size": _safe_size(body.get("size"))})
         return texts, htmls, attachments
     encoded = body.get("data")
@@ -378,32 +381,35 @@ def _within_cutoff(received_at, cutoff):
         return False
 
 
-def _fetch_gmail(client, credentials, limit, days):
-    headers = {"Authorization": "Bearer " + credentials["access_token"]}
-    base = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
-    ids, page_token, seen_pages, seen_ids = [], None, set(), set()
-    cutoff = _cutoff(days)
-    # Pagination remains necessary when the provider returns short pages.
-    while len(ids) < limit:
-        if page_token in seen_pages or len(seen_pages) >= limit:
+def _gmail_message_ids(client, base, headers, cutoff, limit):
+    page_token, seen_pages, seen_ids = None, set(), set()
+    while True:
+        if page_token in seen_pages or len(seen_pages) >= max(100, limit):
             raise ProviderError("郵箱分頁回應重複或超出限制，請稍後重試。")
         seen_pages.add(page_token)
         # Epoch seconds avoid Gmail's PST interpretation of date-only query values.
-        params = {"q": f"in:inbox after:{int(cutoff.timestamp())}", "maxResults": min(100, limit - len(ids))}
+        params = {"q": f"in:inbox after:{int(cutoff.timestamp())}", "maxResults": min(100, limit)}
         if page_token:
             params["pageToken"] = page_token
         response = _request_json(client, "GET", base, headers=headers, params=params)
-        current = [x.get("id") for x in response.get("messages", []) if isinstance(x, dict) and x.get("id")]
-        for remote_id in current:
-            if remote_id not in seen_ids and len(ids) < limit:
-                ids.append(remote_id)
+        for item in response.get("messages", []):
+            remote_id = item.get("id") if isinstance(item, dict) else None
+            if not isinstance(remote_id, str) or not remote_id:
+                raise ProviderError("郵箱服務回傳無效的郵件識別碼。")
+            if remote_id not in seen_ids:
                 seen_ids.add(remote_id)
-        new_token = response.get("nextPageToken")
-        if not current or not new_token:
-            break
-        page_token = new_token
+                yield remote_id
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            return
+
+
+def _fetch_gmail(client, credentials, limit, days):
+    headers = {"Authorization": "Bearer " + credentials["access_token"]}
+    base = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
+    cutoff = _cutoff(days)
     messages = []
-    for remote_id in ids:
+    for remote_id in _gmail_message_ids(client, base, headers, cutoff, limit):
         raw = _request_json(client, "GET", base + "/" + quote(str(remote_id), safe=""), headers=headers, params={"format": "full"}, missing_ok=True)
         if raw is None or "INBOX" not in raw.get("labelIds", []):
             continue  # It can be deleted or moved after the list request.
@@ -417,7 +423,7 @@ def _fetch_gmail(client, credentials, limit, days):
         body = _clean(combined, MAX_BODY)
         selected_truncated = status.get("plain_truncated") if plain else (status.get("html_truncated") if htmls else status.get("truncated"))
         status["truncated"] = bool(status.get("structure_truncated") or selected_truncated or len(combined) > MAX_BODY)
-        if not body:
+        if not body and (not attachments or status["truncated"]):
             body = _clean(raw.get("snippet", ""), MAX_BODY)
             if body:
                 status["truncated"] = True
@@ -431,6 +437,8 @@ def _fetch_gmail(client, credentials, limit, days):
                          "sender": _decode_header(mail_headers.get("from")), "recipients": _decode_header(mail_headers.get("to")),
                          "received_at": received, "body": body, "snippet": _clean(re.sub(r"\s+", " ", body), 300),
                          "unread": "UNREAD" in raw.get("labelIds", []), "attachments": attachments[:100], "body_truncated": status["truncated"]})
+        if len(messages) == limit:
+            break
     return messages
 
 
@@ -565,7 +573,10 @@ class _PinnedIMAPSSL(imaplib.IMAP4_SSL):
 
     def _create_socket(self, timeout):
         for family, kind, proto, _, address in self._addresses:
-            sock = socket.socket(family, kind, proto)
+            try:
+                sock = socket.socket(family, kind, proto)
+            except OSError:
+                continue  # A validated DNS result may use an unavailable local address family.
             try:
                 sock.settimeout(timeout)
                 sock.connect(address)
@@ -716,6 +727,14 @@ def _parameters(value):
     return {str(value[i]).lower(): value[i + 1] for i in range(0, len(value) - 1, 2)}
 
 
+def _attachment_name(params, disposition):
+    if not isinstance(disposition, list) or not disposition:
+        return _decode_header(params.get("name"))
+    disposition_params = _parameters(disposition[1]) if len(disposition) > 1 else {}
+    filename = _decode_header(disposition_params.get("filename") or params.get("name"))
+    return filename or ("attachment" if str(disposition[0]).lower() == "attachment" else "")
+
+
 def _mime_sections(node, prefix="", depth=0):
     bodies, attachments = [], []
     if depth > 20 or not isinstance(node, list) or not node:
@@ -726,6 +745,12 @@ def _mime_sections(node, prefix="", depth=0):
             if not isinstance(item, list):
                 break
             children.append(item)
+        # A multipart attachment owns its whole subtree, including any text parts.
+        fields = node[len(children):]
+        if len(fields) >= 2:
+            filename = _attachment_name(_parameters(fields[1]), fields[2] if len(fields) > 2 else None)
+            if filename:
+                return [], [{"filename": filename, "content_type": _clean("multipart/" + str(fields[0]).lower(), 120)}]
         for index, child in enumerate(children[:100], 1):
             child_prefix = f"{prefix}.{index}" if prefix else str(index)
             a, b = _mime_sections(child, child_prefix, depth + 1)
@@ -738,24 +763,40 @@ def _mime_sections(node, prefix="", depth=0):
     # RFC 3501: disposition follows MD5, whose index depends on text/message fields.
     disposition_index = 9 if str(node[0]).lower() == "text" else (11 if mime == "message/rfc822" else 8)
     disposition = node[disposition_index] if len(node) > disposition_index else None
-    disposition_name = str(disposition[0]).lower() if isinstance(disposition, list) and disposition else ""
-    disposition_params = _parameters(disposition[1]) if isinstance(disposition, list) and len(disposition) > 1 else {}
-    filename = disposition_params.get("filename") or params.get("name")
-    if filename or disposition_name == "attachment" or mime not in {"text/plain", "text/html"}:
-        attachments.append({"filename": _decode_header(filename) or "attachment", "content_type": mime[:120], "size": _safe_size(node[6])})
+    filename = _attachment_name(params, disposition)
+    if filename or mime not in {"text/plain", "text/html"}:
+        attachments.append({"filename": filename or "attachment", "content_type": mime[:120], "size": _safe_size(node[6])})
     else:
         bodies.append({"section": prefix or "1", "mime": mime, "charset": str(params.get("charset") or "utf-8"), "encoding": str(node[5] or "7bit"), "size": _safe_size(node[6])})
     return bodies, attachments
+
+
+def _response_has_uid(data, uid):
+    uid_field = rb"(?:\(|\s)UID\s+" + re.escape(uid) + rb"(?=[\s)]|$)"
+    for part in data or []:
+        metadata = part[0] if isinstance(part, tuple) else part
+        if isinstance(metadata, bytes) and re.search(uid_field, metadata, re.I):
+            return True
+    return False
 
 
 def _fetch_literal(client, uid, section, cap):
     typ, data = client.uid("fetch", uid, f"(BODY.PEEK[{section}]<0.{cap}>)")
     if typ != "OK":
         raise ProviderError("無法讀取郵件，請稍後重試。")
+    field = rb"\bBODY\[" + re.escape(section.encode("ascii")) + rb"\](?:<0>)?\s+"
     for part in data or []:
-        if isinstance(part, tuple) and isinstance(part[1], bytes):
+        if isinstance(part, tuple) and isinstance(part[1], bytes) and re.search(field, part[0], re.I):
             return part[1][:cap]
-    return b""
+        if isinstance(part, bytes):
+            # A short IMAP nstring may be quoted instead of a literal.
+            match = re.search(field + rb'(NIL|"((?:\\.|[^"\\])*)")', part, re.I)
+            if match:
+                return re.sub(rb'\\(["\\])', rb'\1', match.group(2) or b"")[:cap]
+    if _response_has_uid(data, uid):
+        raise ProviderError("郵箱未回傳要求的郵件內容，請稍後重試。")
+    # A UID expunged since SEARCH returns OK with no FETCH data.
+    return None
 
 
 def _fetch_imap(credentials, limit, days):
@@ -774,19 +815,26 @@ def _fetch_imap(credentials, limit, days):
         typ, data = client.uid("search", None, "SINCE", since)
         if typ != "OK":
             raise ProviderError("無法搜尋指定日期範圍的郵件。")
-        uids = (data[0] or b"").split()[-limit:]
+        if not data or not isinstance(data[0], bytes):
+            raise ProviderError("郵箱未提供完整的搜尋結果，請稍後重試。")
+        uids = data[0].split()
+        if any(not uid.isdigit() or len(uid) > 10 for uid in uids):
+            raise ProviderError("郵箱服務回傳無效的郵件識別碼。")
         messages = []
-        for uid in reversed(uids):
-            if not uid.isdigit():
-                continue
+        for checked, uid in enumerate(sorted(set(uids), key=int, reverse=True)):
+            # Bound retries when most search results disappear or fall outside the exact cutoff.
+            if checked >= limit + max(100, limit):
+                raise ProviderError("無法在同步限制內確認足夠的郵件，請稍後重試。")
             typ, structure_data = client.uid("fetch", uid, "(BODYSTRUCTURE FLAGS INTERNALDATE)")
             if typ != "OK":
-                continue  # A message can disappear between SEARCH and FETCH.
+                raise ProviderError("無法讀取郵件結構，請稍後重試。")
             structure_bytes = b" ".join((part[0] + b"\r\n" + part[1]) if isinstance(part, tuple) else (part or b"") for part in structure_data)
             if len(structure_bytes) > MAX_HEADER:
                 raise ProviderError("郵件結構超出大小限制。")
             match = re.search(rb"BODYSTRUCTURE\s+(\()", structure_bytes, re.I)
             if not match:
+                if _response_has_uid(structure_data, uid):
+                    raise ProviderError("郵箱未回傳要求的郵件結構，請稍後重試。")
                 continue
             try:
                 structure = _imap_tokens(structure_bytes[match.start(1):])
@@ -794,7 +842,7 @@ def _fetch_imap(credentials, limit, days):
                 raise ProviderError("無法解析郵件 MIME 結構。") from None
             sections, attachments = _mime_sections(structure)
             header_bytes = _fetch_literal(client, uid, "HEADER.FIELDS (SUBJECT FROM TO DATE MESSAGE-ID)", MAX_HEADER)
-            if not header_bytes:
+            if header_bytes is None:
                 continue
             header = BytesParser(policy=policy.default).parsebytes(header_bytes, headersonly=True)
             internal = re.search(rb'INTERNALDATE\s+"([^"]+)"', structure_bytes, re.I)
@@ -806,12 +854,16 @@ def _fetch_imap(credentials, limit, days):
             content = []
             remaining = MAX_WIRE_BODY
             body_truncated = len(selected) > 10
+            disappeared = False
             for part in selected[:10]:
                 if remaining <= 0:
                     body_truncated = True
                     break
                 cap = min(remaining, MAX_WIRE_BODY)
                 body_bytes = _fetch_literal(client, uid, part["section"], cap)
+                if body_bytes is None:
+                    disappeared = True
+                    break
                 if part["size"] > len(body_bytes):
                     body_truncated = True
                 remaining -= len(body_bytes)
@@ -832,6 +884,8 @@ def _fetch_imap(credentials, limit, days):
                 else:
                     body_truncated = body_truncated or len(decoded) > MAX_BODY
                     content.append(_clean(decoded, MAX_BODY))
+            if disappeared:
+                continue
             combined = "\n\n".join(content)
             body_truncated = body_truncated or len(combined) > MAX_BODY
             body = _clean(combined, MAX_BODY)
@@ -840,6 +894,8 @@ def _fetch_imap(credentials, limit, days):
                              "sender": _decode_header(header.get("From")), "recipients": _decode_header(header.get("To")),
                              "received_at": received, "snippet": _clean(re.sub(r"\s+", " ", body), 300), "body": body,
                              "unread": not bool(flags and re.search(rb"(?:^|\s)\\Seen(?:$|\s)", flags.group(1), re.I)), "attachments": attachments[:100], "body_truncated": body_truncated})
+            if len(messages) == limit:
+                break
         return messages
     except ProviderError:
         raise

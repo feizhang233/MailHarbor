@@ -34,6 +34,81 @@ async def bridge_smoke(origin, token):
             assert not read_result.isError
 
 
+def connect_imap_mailboxes(page):
+    from playwright.sync_api import expect
+    page.locator('nav a[href="#accounts"]').click()
+    add = page.locator("#page-accounts [data-open-account]")
+    picker = page.locator("#provider-select")
+    host = page.locator("#account-host")
+    password = page.locator("#account-password")
+    submit = page.locator("#account-form button[type=submit]")
+
+    add.click()
+    picker.select_option("qq")
+    expect(host).to_have_value("imap.qq.com")
+    page.locator("#account-email").fill("legacy@qq.com")
+    password.fill("fixture-qq-code")
+    held = []
+    page.route("**/api/accounts/imap", lambda route: held.append(route))
+    page.locator("#cancel-account").click()
+    expect(page.locator("#discard-account")).to_be_visible()
+    submit.click()
+    expect(page.locator("#keep-account")).to_be_focused()
+    assert not held, "Choosing whether to discard must not submit credentials"
+    page.locator("#keep-account").click()
+    with page.expect_request(lambda req: req.url.endswith("/api/accounts/imap")):
+        submit.click()
+    expect(page.locator("#account-email")).to_be_disabled()
+    expect(page.locator("#close-account")).to_be_disabled()
+    page.keyboard.press("Escape")
+    expect(page.locator("#account-dialog")).to_be_visible()
+    held.pop().fulfill(status=200, content_type="text/html", body="<html>Gateway response</html>")
+    page.unroute("**/api/accounts/imap")
+    expect(page.locator("#account-error")).to_contain_text("操作結果尚未確認")
+    expect(page.locator("#account-email")).to_be_enabled()
+    expect(password).to_have_value("fixture-qq-code")
+    submit.click()
+    expect(page.locator("#accounts-list")).to_contain_text("legacy@qq.com")
+
+    desktop_size = page.viewport_size
+    page.set_viewport_size({"width": 390, "height": 844})
+    add.click()
+    expect(picker).to_have_value("custom")
+    expect(host).to_be_editable()
+    expect(host).to_have_value("")
+    picker.select_option("qq")
+    page.locator("#account-email").fill("staff@example.test")
+    page.locator("#account-label").fill("Work mailbox")
+    password.fill("stale-qq-code")
+    picker.select_option("163")
+    expect(picker).to_have_value("163")
+    expect(host).to_have_value("imap.163.com")
+    expect(password).to_have_value("")
+    expect(page.locator("#discard-account")).not_to_be_visible()
+
+    page.locator("#advanced-settings summary").click()
+    expect(host).not_to_be_editable()
+    page.locator("#account-username").fill("staff-login")
+    page.locator("#account-folder").fill("Archive")
+    page.locator("#use-custom-imap").click()
+    expect(picker).to_have_value("custom")
+    expect(host).to_be_focused()
+    expect(host).to_be_editable()
+    expect(host).to_have_value("")
+    expect(page.locator("#account-email")).to_have_value("staff@example.test")
+    expect(page.locator("#account-label")).to_have_value("Work mailbox")
+    host.fill("mail.example.test")
+    password.fill("fixture-work-code")
+    with page.expect_request(lambda req: req.url.endswith("/api/accounts/imap") and req.method == "POST") as sent:
+        submit.click()
+    body = sent.value.post_data_json
+    assert (body["provider"], body["host"], body["password"]) == ("custom", "mail.example.test", "fixture-work-code")
+    assert (body["username"], body["folder"]) == ("staff-login", "Archive")
+    expect(page.locator("#accounts-list")).to_contain_text("staff@example.test")
+    expect(page.locator("#accounts-list")).to_contain_text("legacy@qq.com")
+    page.set_viewport_size(desktop_size)
+
+
 def browser_smoke(origin, password):
     from playwright.sync_api import sync_playwright, expect
     with sync_playwright() as runtime:
@@ -57,6 +132,7 @@ def browser_smoke(origin, password):
         expect(page.locator("#reader-content")).to_contain_text("CI fixture body")
         assert page.evaluate("window.__mailXss") is None
         page.locator("#close-reader").click()
+        connect_imap_mailboxes(page)
         page.locator('nav a[href="#settings"]').click()
         expect(page.locator("#sync-days")).to_be_enabled()
         page.locator("#sync-days").fill("45")
@@ -136,7 +212,7 @@ def main():
             fixture = json.loads((data / "fixture.json").read_text())
             asyncio.run(bridge_smoke(origin, fixture["token"]))
             browser_smoke(origin, fixture["password"])
-            print("Live fixture smoke passed: HTTP app, stdio MCP bridge, browser login/settings/mail/token/mobile flows.")
+            print("Live fixture smoke passed: HTTP app, stdio MCP bridge, browser login/IMAP/settings/mail/token/mobile flows.")
         finally:
             server.terminate()
             try:

@@ -102,10 +102,25 @@
       <div id="oauth-pane" hidden><div id="oauth-state" class="banner"></div><p id="oauth-error" class="error-line" role="alert"></p><button id="open-oauth-settings" type="button" class="button outline full" data-js-control disabled hidden>前往設定，填入授權資料</button><button id="start-oauth" type="button" class="button primary full" data-js-control disabled>登入並授權</button></div>
       <div id="unsupported-pane" class="banner warning" hidden>此服務目前無法直接連接。</div>
       <form id="account-form" novalidate hidden>
+        <fieldset id="account-fields">
         <div class="form-grid"><div class="field"><label for="account-email">郵箱地址</label><input id="account-email" name="email" type="email" autocomplete="email" required maxlength="254" aria-describedby="account-email-error"><span id="account-email-error" class="field-error"></span></div><div class="field"><label for="account-label">顯示名稱 <span class="optional">選填</span></label><input id="account-label" name="label" maxlength="80" placeholder="例如：工作郵箱" aria-describedby="account-label-error"><span id="account-label-error" class="field-error"></span></div></div>
         <div class="field"><label for="account-password">應用程式密碼／授權碼</label><div class="secret-wrap"><input id="account-password" name="password" type="password" autocomplete="off" required aria-describedby="account-password-help account-password-error"><button type="button" class="reveal" data-reveal="account-password" aria-label="顯示郵箱授權碼" aria-pressed="false" data-js-control disabled>顯示</button></div><small id="account-password-help" class="muted">請先在郵箱設定開啟 IMAP，並產生專用密碼或授權碼。</small><span id="account-password-error" class="field-error"></span></div>
-        <details id="advanced-settings"><summary>伺服器與進階設定</summary><div class="form-grid"><div class="field"><label for="account-host">IMAP 伺服器</label><input id="account-host" name="host" autocomplete="off" spellcheck="false" required aria-describedby="account-host-error"><span id="account-host-error" class="field-error"></span></div><div class="field"><label for="account-port">TLS 連接埠</label><input id="account-port" name="port" type="number" min="993" max="993" value="993" required readonly aria-describedby="account-port-error"><span id="account-port-error" class="field-error"></span></div><div class="field"><label for="account-username">登入使用者名稱 <span class="optional">選填</span></label><input id="account-username" name="username" autocomplete="username" placeholder="預設使用郵箱地址" aria-describedby="account-username-error"><span id="account-username-error" class="field-error"></span></div><div class="field"><label for="account-folder">同步資料夾</label><input id="account-folder" name="folder" value="INBOX" maxlength="200" required aria-describedby="account-folder-error"><span id="account-folder-error" class="field-error"></span></div></div></details>
+        <details id="advanced-settings">
+          <summary>伺服器與進階設定</summary>
+          <div class="form-grid">
+            <div class="field">
+              <label for="account-host">IMAP 伺服器</label>
+              <input id="account-host" name="host" autocomplete="off" spellcheck="false" placeholder="imap.example.com" required maxlength="253" aria-describedby="account-host-error">
+              <span id="account-host-error" class="field-error"></span>
+              <button id="use-custom-imap" type="button" class="button outline small" data-js-control disabled hidden>使用自訂 IMAP 主機</button>
+            </div>
+            <div class="field"><label for="account-port">TLS 連接埠</label><input id="account-port" name="port" type="number" min="993" max="993" value="993" required readonly aria-describedby="account-port-error"><span id="account-port-error" class="field-error"></span></div>
+            <div class="field"><label for="account-username">登入使用者名稱 <span class="optional">選填</span></label><input id="account-username" name="username" autocomplete="username" placeholder="預設使用郵箱地址" aria-describedby="account-username-error"><span id="account-username-error" class="field-error"></span></div>
+            <div class="field"><label for="account-folder">同步資料夾</label><input id="account-folder" name="folder" value="INBOX" maxlength="200" required aria-describedby="account-folder-error"><span id="account-folder-error" class="field-error"></span></div>
+          </div>
+        </details>
         <p id="account-error" class="error-line" role="alert"></p><div class="dialog-actions"><button type="button" class="button outline" id="cancel-account" data-js-control disabled>取消</button><button type="submit" class="button primary">驗證並連接</button></div>
+        </fieldset>
       </form>
       <div id="discard-account" class="banner warning" hidden><p>尚未儲存的郵箱設定將會清除。</p><div class="button-row"><button id="keep-account" type="button" class="button outline" data-js-control disabled>繼續編輯</button><button id="discard-account-confirm" type="button" class="button danger" data-js-control disabled>捨棄設定</button></div></div>
     </div>

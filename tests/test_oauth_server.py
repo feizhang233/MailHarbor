@@ -255,6 +255,30 @@ class OAuthServerTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/oauth/consent", params={"request_id": request_id}).status_code, 403)
         self.assertEqual(self.client.post("/api/oauth/consent", json={"request_id": request_id, "approve": True}, headers=self.headers).status_code, 403)
 
+    def test_consent_and_grants_use_verified_external_session(self):
+        sessions = {"one": {"id": "verified-one", "csrf": "csrf-one"},
+                    "two": {"id": "verified-two", "csrf": "csrf-two"}}
+        self.server.owner_session = lambda request: sessions.get(request.cookies.get("external_session"))
+        self.client.cookies.clear()
+        self.client.cookies.set("external_session", "one")
+        self.assertEqual(self.client.get("/api/oauth/grants").status_code, 200)
+        request_id = self.begin()
+        query = {"request_id": request_id}
+        self.assertEqual(self.client.get("/api/oauth/consent", params=query).status_code, 200)
+
+        self.client.cookies.set("external_session", "two")
+        self.client.cookies.set("mailharbor_session", "verified-one")
+        self.assertEqual(self.client.get("/api/oauth/consent", params=query).status_code, 403)
+        self.client.cookies.set("external_session", "one")
+        decision = {**query, "approve": True}
+        url = "/api/oauth/consent"
+        self.assertEqual(self.client.post(url, json=decision, headers=self.headers).status_code, 403)
+        headers = {"Origin": self.settings.public_url, "X-CSRF-Token": "csrf-one"}
+        self.assertEqual(self.client.post(url, json=decision, headers=headers).status_code, 200)
+        self.assertEqual(len(self.client.get("/api/oauth/grants").json()["grants"]), 1)
+        self.client.cookies.delete("external_session")
+        self.assertEqual(self.client.get("/api/oauth/grants").status_code, 401)
+
     def test_consent_requires_display_and_cannot_replay(self):
         request_id = self.begin()
         response = self.client.post("/api/oauth/consent", json={"request_id": request_id, "approve": True}, headers=self.headers)

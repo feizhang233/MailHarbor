@@ -427,8 +427,11 @@ class OAuthServer:
         def binding(request):
             # Fail closed even if a future caller mounts this router outside the host guard.
             session = self.owner_session(request) if callable(self.owner_session) else None
-            sid = request.cookies.get("mailharbor_session", "")
-            if not session or not sid:
+            if not session:
+                raise OAuthError("access_denied", "請先登入管理頁。", 401)
+            # External owner sessions supply their verified ID. Local owner sessions use the validated cookie.
+            sid = session.get("id", request.cookies.get("mailharbor_session", ""))
+            if not isinstance(sid, str) or not sid:
                 raise OAuthError("access_denied", "請先登入管理頁。", 401)
             if request.method not in {"GET", "HEAD"}:
                 csrf = request.headers.get("x-csrf-token", "")

@@ -25,6 +25,11 @@ CREDS = {"email": "person@example.com", "username": "person@example.com", "passw
          "host": "imap.example.com", "port": 993, "folder": "INBOX"}
 PUBLIC_DNS = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 993))]
 FIXED_CUTOFF = datetime(2026, 10, 1, 9, 0, tzinfo=timezone.utc)
+IMAP_HEADER = b"HEADER.FIELDS (SUBJECT FROM TO DATE MESSAGE-ID)"
+
+
+def imap_literal(section, value):
+    return (b"1 (BODY[" + section + b"]<0> {" + str(len(value)).encode("ascii") + b"}", value)
 
 
 class OAuthTests(unittest.TestCase):
@@ -171,6 +176,18 @@ class ImapNetworkTests(unittest.TestCase):
         with self.assertRaises(p.ProviderError):
             obj.read(p.MAX_WIRE_BODY + p.MAX_HEADER + 1)
 
+    def test_unavailable_ipv6_socket_falls_back_to_validated_ipv4(self):
+        client = object.__new__(p._PinnedIMAPSSL)
+        client._addresses = [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:4700:4700::1111", 993, 0, 0)), *PUBLIC_DNS]
+        client.host = "imap.example.com"
+        client.ssl_context = MagicMock()
+        ipv4_socket = MagicMock()
+        with patch.object(p.socket, "socket", side_effect=[OSError("IPv6 unavailable"), ipv4_socket]):
+            connection = client._create_socket(20)
+        self.assertIs(connection, client.ssl_context.wrap_socket.return_value)
+        ipv4_socket.connect.assert_called_once_with(("93.184.216.34", 993))
+        client.ssl_context.wrap_socket.assert_called_once_with(ipv4_socket, server_hostname=client.host)
+
     def test_probe_selects_readonly_and_never_changes_messages(self):
         fake = MagicMock()
         fake.select.return_value = ("OK", [b"1"])
@@ -240,6 +257,12 @@ class BodyParsingTests(unittest.TestCase):
         self.assertEqual(sections, [])
         self.assertEqual(attachments[0]["filename"], "notes.txt")
 
+    def test_imap_multipart_attachment_does_not_expose_its_text_parts(self):
+        raw = b'(("TEXT" "PLAIN" NIL NIL NIL "7BIT" 5 1)(("TEXT" "PLAIN" NIL NIL NIL "7BIT" 14 1) "MIXED" NIL ("ATTACHMENT" ("FILENAME" "notes.mime"))) "MIXED")'
+        sections, attachments = p._mime_sections(p._imap_tokens(raw))
+        self.assertEqual([part["section"] for part in sections], ["1"])
+        self.assertEqual(attachments, [{"filename": "notes.mime", "content_type": "multipart/mixed"}])
+
     def test_imap_literal_tokens_and_depth_limit(self):
         self.assertEqual(p._imap_tokens(b'("TEXT" {5}\r\nPLAIN NIL)'), ["TEXT", "PLAIN", None])
         with self.assertRaises(p.ProviderError):
@@ -257,6 +280,14 @@ class BodyParsingTests(unittest.TestCase):
         self.assertEqual(html, ["html body"])
         self.assertEqual(attachments[0]["filename"], "secret.txt")
         self.assertNotIn("DO NOT INDEX", json.dumps((plain, html, attachments)))
+
+    def test_gmail_unnamed_text_attachment_remains_metadata_only(self):
+        payload = {"mimeType": "text/plain", "filename": "",
+                   "headers": [{"name": "Content-Disposition", "value": "Attachment"}],
+                   "body": {"data": base64.urlsafe_b64encode(b"private").decode(), "size": 7}}
+        plain, html, attachments = p._gmail_body(payload)
+        self.assertEqual((plain, html), ([], []))
+        self.assertEqual(attachments, [{"filename": "attachment", "content_type": "text/plain", "size": 7}])
 
     def test_unfetched_large_gmail_body_marked_incomplete(self):
         status = {"truncated": False}
@@ -289,9 +320,9 @@ class BodyParsingTests(unittest.TestCase):
             if query == "(BODYSTRUCTURE FLAGS INTERNALDATE)":
                 return "OK", [structure]
             if "HEADER.FIELDS" in query:
-                return "OK", [(b"header", b"Subject: Sample\r\nFrom: a@example.com\r\nTo: b@example.com\r\n\r\n")]
+                return "OK", [imap_literal(IMAP_HEADER, b"Subject: Sample\r\nFrom: a@example.com\r\nTo: b@example.com\r\n\r\n")]
             if "BODY.PEEK[1]" in query:
-                return "OK", [(b"body", b"Hello mail")]
+                return "OK", [imap_literal(b"1", b"Hello mail")]
             self.fail("unexpected fetch: " + query)
         fake.uid.side_effect = uid
         with patch.object(p, "_imap_open", return_value=fake), patch.object(p, "_cutoff", return_value=FIXED_CUTOFF):
@@ -318,12 +349,68 @@ class BodyParsingTests(unittest.TestCase):
             if query == "(BODYSTRUCTURE FLAGS INTERNALDATE)":
                 return "OK", [b'1 (UID 5 FLAGS () INTERNALDATE "01-Oct-2026 08:59:59 +0000" BODYSTRUCTURE ("TEXT" "PLAIN" NIL NIL NIL "7BIT" 5 1))']
             if "HEADER.FIELDS" in query:
-                return "OK", [(b"header", b"Subject: Old\r\n\r\n")]
+                return "OK", [imap_literal(IMAP_HEADER, b"Subject: Old\r\n\r\n")]
             self.fail("old message body must not be downloaded")
         fake.uid.side_effect = uid
         with patch.object(p, "_imap_open", return_value=fake), patch.object(p, "_cutoff", return_value=FIXED_CUTOFF):
             self.assertEqual(p._fetch_imap(CREDS, 200, 30), [])
         self.assertFalse(any("BODY.PEEK[1]" in q for q in seen_queries))
+
+    def test_imap_fetch_failure_cannot_replace_a_snapshot_with_missing_messages(self):
+        fake = MagicMock()
+        fake.response.return_value = ("UIDVALIDITY", [b"42"])
+        fake.uid.side_effect = [("OK", [b"5"]), ("NO", [b"Private server detail"])]
+        with patch.object(p, "_imap_open", return_value=fake), self.assertRaises(p.ProviderError) as failure:
+            p._fetch_imap(CREDS, 1, 30)
+        self.assertNotIn("Private server detail", str(failure.exception))
+        fake.logout.assert_called_once()
+
+    def test_imap_fills_the_limit_after_a_message_disappears(self):
+        fake = MagicMock()
+        fake.response.return_value = ("UIDVALIDITY", [b"42"])
+        structure = b'1 (UID 2 FLAGS () INTERNALDATE "29-Oct-2026 10:00:00 +0000" BODYSTRUCTURE ("TEXT" "PLAIN" NIL NIL NIL "7BIT" 5 1))'
+        fake.uid.side_effect = [
+            ("OK", [b"1 2 3"]), ("OK", [None]), ("OK", [structure]),
+            ("OK", [imap_literal(IMAP_HEADER, b"Subject: Remaining\r\n\r\n")]), ("OK", [imap_literal(b"1", b"hello")]),
+        ]
+        with patch.object(p, "_imap_open", return_value=fake), patch.object(p, "_cutoff", return_value=FIXED_CUTOFF):
+            messages = p._fetch_imap(CREDS, 1, 30)
+        self.assertEqual([message["remote_id"] for message in messages], ["42:2"])
+        self.assertEqual([call.args[1] for call in fake.uid.call_args_list[1:]], [b"3", b"2", b"2", b"2"])
+
+    def test_imap_body_fetch_distinguishes_quoted_empty_and_expunged(self):
+        client = MagicMock()
+        client.uid.side_effect = [
+            ("OK", [br'2 (UID 7 BODY[1]<0> "say \"hi\"")']),
+            ("OK", [b'2 (UID 7 BODY[1]<0> "")']), ("OK", [None]),
+        ]
+        self.assertEqual(p._fetch_literal(client, b"7", "1", 20), b'say "hi"')
+        self.assertEqual(p._fetch_literal(client, b"7", "1", 20), b"")
+        self.assertIsNone(p._fetch_literal(client, b"7", "1", 20))
+
+    def test_imap_matching_uid_requires_requested_structure_and_body(self):
+        incomplete_fetch = ("OK", [b"3 (FLAGS () UID 7)"])
+        client = MagicMock()
+        client.response.return_value = ("UIDVALIDITY", [b"42"])
+        client.uid.side_effect = [("OK", [b"7"]), incomplete_fetch]
+        with patch.object(p, "_imap_open", return_value=client), self.assertRaises(p.ProviderError):
+            p._fetch_imap(CREDS, 10, 30)
+        wrong_section = ("OK", [imap_literal(b"2", b"other"), b" UID 7)"])
+        client.uid.side_effect = [incomplete_fetch, wrong_section, ("OK", [b"3 (UID 70 FLAGS ())"])]
+        for response in ("missing section", "wrong section"):
+            with self.subTest(response=response), self.assertRaises(p.ProviderError):
+                p._fetch_literal(client, b"7", "1", 20)
+        self.assertIsNone(p._fetch_literal(client, b"7", "1", 20))
+
+    def test_imap_expunged_during_body_fetch_does_not_leave_a_cached_message(self):
+        fake = MagicMock()
+        fake.response.return_value = ("UIDVALIDITY", [b"42"])
+        structure = b'1 (UID 5 FLAGS () INTERNALDATE "29-Oct-2026 10:00:00 +0000" BODYSTRUCTURE ("TEXT" "PLAIN" NIL NIL NIL "7BIT" 5 1))'
+        fake.uid.side_effect = [
+            ("OK", [b"5"]), ("OK", [structure]), ("OK", [imap_literal(IMAP_HEADER, b"Subject: Gone\r\n\r\n")]), ("OK", [None]),
+        ]
+        with patch.object(p, "_imap_open", return_value=fake), patch.object(p, "_cutoff", return_value=FIXED_CUTOFF):
+            self.assertEqual(p._fetch_imap(CREDS, 10, 30), [])
 
 
 class SnapshotTests(unittest.TestCase):
@@ -400,6 +487,30 @@ class SnapshotTests(unittest.TestCase):
             messages = p._fetch_gmail(None, {"access_token": "x"}, 200, 30)
         self.assertEqual([m["remote_id"] for m in messages], ["current"])
         self.assertEqual(seen[0][1]["params"]["q"], "in:inbox after:" + str(int(FIXED_CUTOFF.timestamp())))
+
+    def test_gmail_follows_empty_pages_and_replaces_deleted_candidates(self):
+        responses = [{"nextPageToken": "second"}, {"messages": [{"id": "removed"}], "nextPageToken": "third"},
+                     None, {"messages": [{"id": "remaining"}], "nextPageToken": "unused"}, self.gmail_message("remaining")]
+        with patch.object(p, "_request_json", side_effect=responses) as request, patch.object(p, "_cutoff", return_value=FIXED_CUTOFF):
+            messages = p._fetch_gmail(None, {"access_token": "x"}, 1, 30)
+        self.assertEqual([message["remote_id"] for message in messages], ["remaining"])
+        self.assertEqual(request.call_count, 5)
+
+    def test_gmail_repeated_empty_page_rejects_incomplete_sync(self):
+        with patch.object(p, "_request_json", return_value={"nextPageToken": "again"}) as request:
+            with self.assertRaises(p.ProviderError):
+                p._fetch_gmail(None, {"access_token": "x"}, 1, 30)
+        self.assertEqual(request.call_count, 2)
+
+    def test_gmail_attachment_only_message_does_not_use_snippet_as_body(self):
+        raw = self.gmail_message("one", payload={"mimeType": "text/plain", "filename": "notes.txt",
+                                                 "body": {"data": "cHJpdmF0ZQ==", "size": 7}})
+        raw["snippet"] = "private"
+        with patch.object(p, "_request_json", side_effect=[{"messages": [{"id": "one"}]}, raw]), \
+             patch.object(p, "_cutoff", return_value=FIXED_CUTOFF):
+            result = p._fetch_gmail(None, {"access_token": "x"}, 1, 30)
+        self.assertEqual((result[0]["body"], result[0]["snippet"]), ("", ""))
+        self.assertEqual(result[0]["attachments"][0]["filename"], "notes.txt")
 
     def test_gmail_complete_plain_alternative_not_flagged_for_unused_large_html(self):
         payload = {"mimeType": "multipart/alternative", "parts": [

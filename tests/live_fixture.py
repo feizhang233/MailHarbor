@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from unittest.mock import Mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -29,16 +30,18 @@ def create_fixture(data_dir, origin):
     identity = {"email": "fixture@example.test", "provider_uid": "fixture@example.test"}
     account = store.save_account("custom", identity, credentials, "CI fixture mailbox")
 
-    def fetch(*args, **kwargs):
+    def fetch(supplied, limit, days):
+        if supplied["email"] != identity["email"]:
+            return []
         return [{"remote_id": "ci-fixture-mail", "subject": "CI fixture <script>window.__mailXss=1</script>",
                  "sender": "Fixture <sender@example.test>", "recipients": "fixture@example.test",
                  "received_at": datetime.now(timezone.utc).isoformat(), "snippet": "Synthetic test message",
                  "body": '<img src=x onerror="window.__mailXss=1">\nCI fixture body. This is synthetic test data.',
-                 "unread": True, "attachments": []}], credentials
+                 "unread": True, "attachments": []}]
 
-    providers.fetch_messages = fetch
-    providers.probe_imap = lambda supplied: identity
-    store.replace_snapshot(account["id"], *fetch())
+    providers._imap_open = Mock()
+    providers._fetch_imap = fetch
+    store.replace_snapshot(account["id"], fetch(credentials, settings.sync_limit, settings.sync_days), credentials)
     token = store.create_token("CI stdio bridge")
     return create_app(settings, store), {"password": password, "token": token["token"], "origin": origin}
 

@@ -13,6 +13,11 @@ from pathlib import Path
 from cryptography.fernet import Fernet
 
 
+_ACCOUNT_SUMMARY = """SELECT a.id,a.provider,a.email,a.label,a.folder,
+    a.status,a.last_sync,a.error,a.snapshot_days,a.snapshot_limit,COUNT(m.id) AS message_count
+    FROM accounts a LEFT JOIN messages m ON m.account_id=a.id"""
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -89,10 +94,7 @@ class Store:
 
     def accounts(self):
         with self.db() as db:
-            return [dict(r) for r in db.execute("""SELECT a.id,a.provider,a.email,a.label,a.folder,
-                a.status,a.last_sync,a.error,a.snapshot_days,a.snapshot_limit,COUNT(m.id) AS message_count
-                FROM accounts a LEFT JOIN messages m ON m.account_id=a.id
-                GROUP BY a.id ORDER BY a.email,a.id""")]
+            return [dict(r) for r in db.execute(_ACCOUNT_SUMMARY + " GROUP BY a.id ORDER BY a.email,a.id")]
 
     def account(self, account_id):
         with self.db() as db:
@@ -117,7 +119,8 @@ class Store:
                 generation=accounts.generation+1,status='ready',error=NULL""",
                        (account_id, provider, identity["provider_uid"], identity["email"],
                         label or identity["email"], self.encrypt(credentials), folder))
-        return next(a for a in self.accounts() if a["id"] == account_id)
+            row = db.execute(_ACCOUNT_SUMMARY + " WHERE a.id=? GROUP BY a.id", (account_id,)).fetchone()
+            return dict(row)
 
     def delete_account(self, account_id):
         with self.db() as db:

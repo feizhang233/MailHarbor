@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
@@ -96,6 +97,27 @@ class StoreTests(unittest.TestCase):
         self.store.update_credentials(a["id"], {"password": "OLD"}, old["generation"])
         self.assertEqual(self.store.account(a["id"])["credentials"]["password"], "NEW_SECRET")
         self.assertEqual(self.store.search()["total"], 0)
+
+    def test_save_returns_its_committed_result_during_disconnect(self):
+        # Disconnect immediately after the save transaction commits.
+        database = self.store.db
+        disconnected = []
+
+        @contextmanager
+        def disconnect_after_commit():
+            with database() as db:
+                yield db
+            if not disconnected:
+                with database() as db:
+                    account_id = db.execute("SELECT id FROM accounts").fetchone()[0]
+                    db.execute("DELETE FROM accounts WHERE id=?", (account_id,))
+                    disconnected.append(account_id)
+
+        with patch.object(self.store, "db", disconnect_after_commit):
+            account = self.add()
+        self.assertEqual(disconnected, [account["id"]])
+        self.assertEqual(account["message_count"], 0)
+        self.assertEqual(self.store.accounts(), [])
 
     def test_deleted_account_cannot_be_resurrected(self):
         a = self.add()
@@ -210,6 +232,30 @@ class ApplicationTests(unittest.TestCase):
             self.assertEqual(response.headers["location"], "/?connection_error=1")
             self.assertEqual(exchange.call_count, 1)
 
+    def test_foreign_or_wrong_provider_callback_cannot_consume_pending_login(self):
+        self.login()
+        owner = self.client.cookies.get("mailharbor_session")
+        result = self.client.post("/api/oauth/gmail/start", headers=self.headers).json()
+        state = parse_qs(urlsplit(result["url"]).query)["state"][0]
+
+        def callback(provider):
+            response = self.client.get(f"/api/oauth/{provider}/callback", params={"state": state, "code": "code"},
+                                       follow_redirects=False)
+            return response.headers["location"]
+
+        self.client.cookies.clear()
+        self.login()
+        with patch("mailhub.providers.oauth_exchange", return_value={"refresh_token": "test-token"}) as exchange, \
+             patch("mailhub.providers.identify_oauth", return_value={"email": "test@example.com", "provider_uid": "test"}):
+            self.assertEqual(callback("gmail"), "/?connection_error=1")
+            self.client.cookies.clear()
+            self.client.cookies.set("mailharbor_session", owner)
+            self.assertEqual(callback("microsoft"), "/?connection_error=1")
+            exchange.assert_not_called()
+            self.assertEqual(callback("gmail"), "/?connected=1")
+            self.assertEqual(callback("gmail"), "/?connection_error=1")
+            exchange.assert_called_once()
+
     def test_preset_host_cannot_diverge_from_sync_host(self):
         self.login()
         with patch("mailhub.providers.probe_imap") as probe:
@@ -217,6 +263,30 @@ class ApplicationTests(unittest.TestCase):
                 json={"provider": "icloud", "email": "a@example.com", "password": "app-password", "host": "attacker.example"})
             self.assertEqual(response.status_code, 400)
             probe.assert_not_called()
+
+    def test_adding_another_imap_mailbox_uses_its_own_server_and_credentials(self):
+        self.login()
+        mailboxes = [
+            ("qq", "legacy@qq.com", "", "imap.qq.com"),
+            ("163", "second@163.com", "", "imap.163.com"),
+            ("custom", "staff@example.test", "mail.example.test", "mail.example.test"),
+        ]
+        with patch("mailhub.providers._imap_open") as connect:
+            for provider, email, host, expected_host in mailboxes:
+                with self.subTest(provider=provider):
+                    password = f"test-only-{provider}"
+                    response = self.client.post("/api/accounts/imap", headers=self.headers,
+                        json={"provider": provider, "email": email, "password": password, "host": host})
+                    self.assertEqual(response.status_code, 200)
+                    account = response.json()["account"]
+                    self.assertEqual(account["provider"], provider)
+                    verified = connect.call_args.args[0]
+                    self.assertEqual((verified["host"], verified["username"], verified["password"]),
+                                     (expected_host, email, password))
+                    self.assertEqual(self.app.state.store.account(account["id"])["credentials"], verified)
+        accounts = self.client.get("/api/accounts").json()["accounts"]
+        self.assertEqual({(a["provider"], a["email"]) for a in accounts},
+                         {(provider, email) for provider, email, _, _ in mailboxes})
 
     def test_settings_secret_retention_clearing_persistence_and_csrf(self):
         self.assertEqual(self.client.get("/api/settings").status_code, 401)

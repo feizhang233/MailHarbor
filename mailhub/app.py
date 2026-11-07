@@ -458,10 +458,12 @@ def create_app(settings: Settings, store: Store | None = None):
 
     @app.get("/api/oauth/{provider}/callback")
     async def oauth_callback(provider: str, request: Request, state: str = "", code: str = "", error: str = ""):
-        pending = oauth_states.pop(state, None)
-        if (not pending or pending["provider"] != provider or pending["expires"] < time.time()
-                or not hmac.compare_digest(pending["sid"], request.cookies.get("mailharbor_session", ""))
-                or error or not code or len(code) > 8192):
+        pending = oauth_states.get(state)
+        if (not pending or pending["provider"] != provider
+                or not hmac.compare_digest(pending["sid"], request.cookies.get("mailharbor_session", ""))):
+            return RedirectResponse("/?connection_error=1", status_code=303)
+        del oauth_states[state]
+        if pending["expires"] < time.time() or error or not code or len(code) > 8192:
             return RedirectResponse("/?connection_error=1", status_code=303)
         try:
             credentials = await asyncio.to_thread(providers.oauth_exchange, provider, pending["settings"], code, pending["verifier"])

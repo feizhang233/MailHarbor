@@ -43,6 +43,7 @@ let messagesForbidden = false;
 let calls = [];
 let assigned = [];
 let deferredToken = null;
+let deferredOAuth = null;
 let grantRows = [{ id: "grant-1", client_name: "Test AI", created_at: "2026-10-29T08:00:00Z", last_used_at: null }];
 const settings = { public_url: "https://mail.example.test", sync_interval_seconds: 300, sync_days: 30, sync_limit: 200,
   google: { client_id: "google-test-id", secret_configured: true, redirect_uri: "https://mail.example.test/api/oauth/gmail/callback" },
@@ -62,6 +63,7 @@ const context = vm.createContext({
     if (!authenticated && pathname !== "/api/session" && pathname !== "/api/login") return { ok: false, status: 401, json: async () => ({ detail: "Session expired" }) };
     if (messagesForbidden && pathname === "/api/messages") return { ok: false, status: 403, json: async () => ({ detail: "拒絕存取" }) };
     if (pathname === "/api/tokens" && options.method === "POST" && deferredToken) return deferredToken;
+    if (pathname === "/api/oauth/gmail/start" && deferredOAuth) return deferredOAuth;
     if (pathname === "/api/settings" && options.method === "POST") {
       const body = JSON.parse(options.body);
       settings.sync_interval_seconds = body.sync_interval_seconds; settings.sync_days = body.sync_days; settings.sync_limit = body.sync_limit;
@@ -102,6 +104,22 @@ function flatten(element) { return String(element.textContent || "") + element.c
   vm.runInContext("updateConnectionConfig()", context);
   assert.match(elements["codex-config"].textContent, /MAILHUB_MCP_TOKEN/);
   assert.equal(elements["account-host"].readOnly, true);
+  vm.runInContext('state.providers.push({id:"gmail", name:"Gmail", kind:"oauth", configured:true})', context);
+  for (const cancel of ["closeAccount()", 'changeProvider("icloud")']) {
+    vm.runInContext('openAccount(); changeProvider("gmail")', context);
+    let resolveOAuth;
+    deferredOAuth = new Promise((resolve) => { resolveOAuth = resolve; });
+    const pendingOAuth = elements["start-oauth"].listeners.click();
+    vm.runInContext(cancel, context);
+    resolveOAuth({ok: true, json: async () => ({url:"https://oauth.example.test/old-request"})});
+    await pendingOAuth;
+    assert.equal(assigned.length, 0, "An abandoned OAuth start must not redirect");
+  }
+  vm.runInContext('closeAccount(); openAccount(); changeProvider("gmail")', context);
+  deferredOAuth = Promise.resolve({ok: true, json: async () => ({url:"https://oauth.example.test/current-request"})});
+  await elements["start-oauth"].listeners.click();
+  assert.deepEqual(assigned, ["https://oauth.example.test/current-request"]);
+  vm.runInContext('closeAccount()', context);
   assert.match(elements["coverage"].textContent, /^同步目標：/);
   assert.match(flatten(elements["accounts-list"]), /天數未記錄/);
   assert.match(flatten(elements["mail-list"]), /<script>bad\(\)<\/script>/);
