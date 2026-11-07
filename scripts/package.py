@@ -2,47 +2,81 @@
 """Package reproducible source or a configured plugin, excluding runtime secrets."""
 import argparse
 import json
-import os
 from pathlib import Path
 import shutil
 import sys
-from urllib.parse import urlsplit
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from mailhub.config import normalize_origin
-ROOT_FILES = {
-    "README.md", "CONTRACT.md", "V2-CONTRACT.md", "DESIGN.md", "UX-CONTRACT.md", "premium-ui.json",
-    "Dockerfile", "compose.yaml", ".dockerignore", ".gitignore", ".env.example",
-    "requirements.txt", "requirements-dev.txt", "pyproject.toml", "pytest.ini",
-}
-SOURCE_DIRS = {"mailhub", "scripts", "deploy", "integrations", "plugin", "tests", "docs", ".github"}
-ALLOWED_SUFFIXES = {".py", ".html", ".css", ".js", ".mjs", ".cjs", ".json", ".md", ".toml", ".yaml", ".yml", ".example", ".svg", ".txt"}
+# Keep release contents explicit even when packaging an extracted copy without Git.
+SOURCE_FILES = (
+    ".dockerignore",
+    ".env.example",
+    ".github/workflows/ci.yml",
+    ".gitignore",
+    "CONTRACT.md",
+    "DESIGN.md",
+    "Dockerfile",
+    "README.md",
+    "UX-CONTRACT.md",
+    "V2-CONTRACT.md",
+    "compose.yaml",
+    "deploy/Caddyfile",
+    "docs/ai-connections.md",
+    "docs/deployment.md",
+    "docs/oauth.md",
+    "integrations/claude-desktop.json.example",
+    "integrations/codex.config.toml.example",
+    "integrations/codex.oauth.toml.example",
+    "integrations/cursor.bearer.json.example",
+    "integrations/cursor.oauth.json.example",
+    "integrations/rest_client.py",
+    "mailhub/__init__.py",
+    "mailhub/app.py",
+    "mailhub/config.py",
+    "mailhub/oauth_server.py",
+    "mailhub/providers.py",
+    "mailhub/static/app.css",
+    "mailhub/static/app.js",
+    "mailhub/static/index.html",
+    "mailhub/static/tokens.css",
+    "mailhub/stdio_bridge.py",
+    "mailhub/store.py",
+    "plugin/README.md",
+    "plugin/mcp.json",
+    "plugin/plugin.json",
+    "premium-ui.json",
+    "requirements.txt",
+    "scripts/check_ui.py",
+    "scripts/ci_tests.py",
+    "scripts/generate_ui_tokens.py",
+    "scripts/package.py",
+    "scripts/setup.py",
+    "scripts/stdio_bridge.py",
+    "tests/live_fixture.py",
+    "tests/live_smoke.py",
+    "tests/test_core.py",
+    "tests/test_csrf_regression.py",
+    "tests/test_integrations.py",
+    "tests/test_oauth_server.py",
+    "tests/test_providers.py",
+    "tests/test_sync_regression.py",
+    "tests/ui-verification.md",
+    "tests/ui_logic.cjs",
+    "tests/verification.md",
+)
 
 
 def source_files(root: Path):
-    files = []
-    for filename in ROOT_FILES:
-        path = root / filename
-        if path.is_file() and not path.is_symlink():
-            files.append((path, path.relative_to(root)))
-    for directory in SOURCE_DIRS:
-        base = root / directory
-        if not base.is_dir() or base.is_symlink():
+    for filename in SOURCE_FILES:
+        relative = Path(filename)
+        path = root / relative
+        if path.is_symlink() or any((root / parent).is_symlink() for parent in relative.parents):
             continue
-        for current, subdirs, names in os.walk(base, followlinks=False):
-            subdirs[:] = sorted(name for name in subdirs if not name.startswith(".") and
-                name not in {"__pycache__", "node_modules", "data", "dist", "build"} and
-                not (Path(current) / name).is_symlink())
-            for name in names:
-                path = Path(current) / name
-                if name.startswith(".") or path.is_symlink() or not path.is_file():
-                    continue
-                if path.suffix not in ALLOWED_SUFFIXES and path.name != "Caddyfile":
-                    continue
-                files.append((path, path.relative_to(root)))
-    yield from sorted(files, key=lambda item: str(item[1]))
+        if path.is_file():
+            yield path, relative
 
 
 def make_source_zip(output: Path) -> int:

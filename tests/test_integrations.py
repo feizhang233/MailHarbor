@@ -86,15 +86,25 @@ class PackagingTests(unittest.TestCase):
                 "mailhub/app.py": "# source",
                 "mailhub/local.sqlite": "excluded",
                 "mailhub/.env": "excluded",
+                "mailhub/local_settings.py": "excluded",
+                "integrations/cursor.bearer.json": "excluded",
+                "integrations/cursor.bearer.json.example": "{}",
+                "deploy/production-verification.json": "excluded",
+                "tests/private-mail.txt": "excluded",
                 "data/messages.json": "excluded",
+                "data/app.js": "excluded",
             }
             for name, value in fixture.items():
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(value)
-            (root / "mailhub/private.py").symlink_to(root / ".env")
+            (root / "mailhub/config.py").symlink_to(root / ".env")
+            (root / "mailhub/static").symlink_to(root / "data", target_is_directory=True)
             actual = {str(relative) for _, relative in self.packager.source_files(root)}
-            self.assertEqual(actual, {".github/workflows/ci.yml", "tests/ui_logic.cjs", ".env.example", "mailhub/app.py"})
+            self.assertEqual(actual, {
+                ".github/workflows/ci.yml", "tests/ui_logic.cjs", ".env.example", "mailhub/app.py",
+                "integrations/cursor.bearer.json.example",
+            })
 
     def test_oauth_plugin_generation_has_bound_resource_and_no_secret(self):
         with tempfile.TemporaryDirectory() as temporary:
