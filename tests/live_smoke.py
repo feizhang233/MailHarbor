@@ -195,6 +195,13 @@ def check_languages(browser, origin, password):
         page.locator("#discard-settings").click()
         page.locator("#confirm-action").click()
         expect(page.locator("#google-client-id")).not_to_have_value("draft-client-id")
+        page.set_viewport_size({"width": 320, "height": 640})
+        page.locator("#category-display").click()
+        page.locator("#settings-language").select_option("de")
+        page.locator("#category-accounts").click()
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), "German mailbox category overflows at 320px"
+        page.locator("#category-display").click()
+        page.locator("#settings-language").select_option("fr")
         page.locator('nav a[href="#inbox"]').click()
         expect(page.locator("#mail-list")).to_contain_text("CI fixture <script>")
         expect(page.locator("#coverage")).not_to_contain_text("同步目標")

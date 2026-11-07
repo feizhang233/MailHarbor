@@ -209,7 +209,7 @@ dialog::backdrop { background: #172f3c66; }
 .consent-pending { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .settings-layout { display: grid; grid-template-columns: minmax(10rem, 13rem) minmax(0, 1fr); gap: var(--space-lg); align-items: start; }
 #settings-categories { display: grid; gap: 4px; padding: 6px; border: 1px solid var(--color-line); border-radius: var(--radius-panel); background: var(--color-surface); }
-#settings-categories button { min-height: 44px; padding: 8px 13px; border: 1px solid transparent; border-radius: var(--radius-control); background: transparent; text-align: start; line-height: 1.4; }
+#settings-categories button { min-width: 0; min-height: 44px; padding: 8px 13px; border: 1px solid transparent; border-radius: var(--radius-control); background: transparent; text-align: start; line-height: 1.4; hyphens: auto; overflow-wrap: anywhere; }
 #settings-categories button:hover { color: var(--color-primary); background: var(--color-background); }
 #settings-categories button[aria-pressed="true"], .provider-switch .button[aria-pressed="true"] { color: var(--color-primary); background: var(--color-primary-soft); border-color: var(--color-primary); font-weight: 600; }
 .settings-content { min-width: 0; max-width: 56rem; }
