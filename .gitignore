@@ -23,6 +23,8 @@ production-verification.json
 production-runbook.md
 /integrations/*.json
 /integrations/*.toml
+/integrations/*.yml
+/integrations/*.yaml
 
 # Mail archives and runtime data
 *.eml

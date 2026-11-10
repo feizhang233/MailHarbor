@@ -1,8 +1,8 @@
-"""Small single-owner OAuth authorization server for the read-only MCP resource.
+"""OAuth authorization server for each user's MCP mail resource.
 
 Public clients use S256 PKCE and dynamic registration. This is not an identity
 provider: no OIDC/id_tokens, client secrets, token passthrough or arbitrary URL
-fetching. Owner consent is checked by the host application's session validator.
+fetching. Consent is bound to the user authenticated by the host application.
 """
 import base64
 import hashlib
@@ -14,8 +14,8 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
+from .config import READ_SCOPE as SCOPE, READ_REPLY_SCOPE, REPLY_SCOPE
 
-SCOPE = "mail.read"
 REQUEST_TTL = 600
 CODE_TTL = 60
 ACCESS_TTL = 3600
@@ -65,8 +65,19 @@ def valid_redirect_uri(value):
         return False
 
 
+def normalized_scope(value):
+    if not isinstance(value, str):
+        return None
+    parts = value.split(" ")
+    if parts == [SCOPE]:
+        return SCOPE
+    if len(parts) == 2 and set(parts) == {SCOPE, REPLY_SCOPE}:
+        return READ_REPLY_SCOPE
+    return None
+
+
 def valid_scope(value):
-    return isinstance(value, str) and value.split() == [SCOPE]
+    return normalized_scope(value) is not None
 
 
 def pkce_challenge(verifier):
@@ -88,7 +99,7 @@ class OAuthServer:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS oauth_clients (
                     id TEXT PRIMARY KEY, name TEXT NOT NULL, redirects BLOB NOT NULL,
-                    created_at REAL NOT NULL, last_used_at REAL NOT NULL
+                    created_at REAL NOT NULL, last_used_at REAL NOT NULL, scope TEXT
                 );
                 CREATE TABLE IF NOT EXISTS oauth_requests (
                     id_hash TEXT PRIMARY KEY, payload BLOB NOT NULL,
@@ -104,11 +115,12 @@ class OAuthServer:
                     id TEXT PRIMARY KEY, client_id TEXT NOT NULL REFERENCES oauth_clients(id),
                     resource TEXT NOT NULL, scope TEXT NOT NULL,
                     created_at REAL NOT NULL, last_used_at REAL,
-                    expires_at REAL NOT NULL, revoked INTEGER NOT NULL DEFAULT 0
+                    expires_at REAL NOT NULL, revoked INTEGER NOT NULL DEFAULT 0,
+                    user_id TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS oauth_tokens (
                     token_hash TEXT PRIMARY KEY, grant_id TEXT NOT NULL REFERENCES oauth_grants(id) ON DELETE CASCADE,
-                    kind TEXT NOT NULL, expires_at REAL NOT NULL, used INTEGER NOT NULL DEFAULT 0
+                    kind TEXT NOT NULL, expires_at REAL NOT NULL, used INTEGER NOT NULL DEFAULT 0, scope TEXT
                 );
                 CREATE INDEX IF NOT EXISTS oauth_tokens_grant ON oauth_tokens(grant_id);
                 CREATE TABLE IF NOT EXISTS oauth_limits (
@@ -117,6 +129,15 @@ class OAuthServer:
             """)
             if "client_id" not in {row[1] for row in db.execute("PRAGMA table_info(oauth_requests)")}:
                 db.execute("ALTER TABLE oauth_requests ADD COLUMN client_id TEXT REFERENCES oauth_clients(id)")
+            if "scope" not in {row[1] for row in db.execute("PRAGMA table_info(oauth_clients)")}:
+                # Earlier registrations were explicitly issued mail.read.
+                db.execute("ALTER TABLE oauth_clients ADD COLUMN scope TEXT DEFAULT 'mail.read'")
+            if "scope" not in {row[1] for row in db.execute("PRAGMA table_info(oauth_tokens)")}:
+                db.execute("ALTER TABLE oauth_tokens ADD COLUMN scope TEXT DEFAULT 'mail.read'")
+            if "user_id" not in {row[1] for row in db.execute("PRAGMA table_info(oauth_grants)")}:
+                # All grants issued before IAM belonged to the original installation owner.
+                db.execute("ALTER TABLE oauth_grants ADD COLUMN user_id TEXT NOT NULL DEFAULT 'owner'")
+            db.execute("CREATE INDEX IF NOT EXISTS oauth_grants_user ON oauth_grants(user_id, revoked, expires_at)")
         self.router = self._build_router()
 
     @property
@@ -184,8 +205,9 @@ class OAuthServer:
                 or "authorization_code" not in grants or set(grants) - {"authorization_code", "refresh_token"}
                 or responses != ["code"]):
             raise OAuthError("invalid_client_metadata", "Only authorization_code and refresh_token grants are supported.")
-        if data.get("scope") is not None and not valid_scope(data["scope"]):
-            raise OAuthError("invalid_client_metadata", "The only available scope is mail.read.")
+        client_scope = normalized_scope(data.get("scope"))
+        if "scope" in data and not client_scope:
+            raise OAuthError("invalid_client_metadata", "Use mail.read, optionally with mail.reply.")
         name = data.get("client_name") or "未命名 AI 客戶端"
         if not isinstance(name, str) or not 1 <= len(name.strip()) <= 100 or any(ord(c) < 32 for c in name):
             raise OAuthError("invalid_client_metadata", "Invalid client name.")
@@ -199,11 +221,12 @@ class OAuthServer:
             self._prune(db, now)
             if db.execute("SELECT COUNT(*) FROM oauth_clients").fetchone()[0] >= MAX_CLIENTS:
                 raise OAuthError("temporarily_unavailable", "Client registration limit reached.", 429)
-            db.execute("INSERT INTO oauth_clients VALUES(?,?,?,?,?)",
-                       (client_id, name.strip(), self.store.encrypt(redirects), now, now))
+            db.execute("INSERT INTO oauth_clients(id,name,redirects,created_at,last_used_at,scope) VALUES(?,?,?,?,?,?)",
+                       (client_id, name.strip(), self.store.encrypt(redirects), now, now, client_scope))
         return {"client_id": client_id, "client_id_issued_at": int(now), "client_name": name.strip(),
                 "redirect_uris": redirects, "token_endpoint_auth_method": "none",
-                "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"], "scope": SCOPE}
+                "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
+                **({"scope": client_scope} if client_scope else {})}
 
     def begin_authorization(self, parameters, peer="unknown"):
         required = ("client_id", "redirect_uri", "response_type", "resource", "code_challenge", "code_challenge_method")
@@ -213,9 +236,9 @@ class OAuthServer:
             raise OAuthError("unsupported_response_type", "Only authorization code is supported.")
         if parameters["resource"] != self.resource:
             raise OAuthError("invalid_target", "The resource must match the MCP endpoint exactly.")
-        scope = parameters.get("scope", SCOPE)
-        if not valid_scope(scope):
-            raise OAuthError("invalid_scope", "The only available scope is mail.read.")
+        scope = normalized_scope(parameters.get("scope", SCOPE))
+        if not scope:
+            raise OAuthError("invalid_scope", "Use mail.read, optionally with mail.reply.")
         if parameters["code_challenge_method"] != "S256" or not _PKCE.fullmatch(parameters["code_challenge"]):
             raise OAuthError("invalid_request", "A valid S256 PKCE challenge is required.")
         state = parameters.get("state", "")
@@ -233,44 +256,53 @@ class OAuthServer:
             if not client or parameters["redirect_uri"] not in self.store.decrypt(client["redirects"]):
                 # Never redirect to an unvalidated caller-provided URI, even on errors.
                 raise OAuthError("invalid_request", "Unknown client or unregistered redirect URI.")
+            if client["scope"] == SCOPE and scope != SCOPE:
+                raise OAuthError("invalid_scope", "Register this client for mail.reply before requesting it.")
             if db.execute("SELECT COUNT(*) FROM oauth_requests").fetchone()[0] >= MAX_REQUESTS:
                 raise OAuthError("temporarily_unavailable", "Too many pending authorization requests.", 429)
             payload = {k: parameters[k] for k in required}
-            payload.update(state=state, scope=SCOPE, client_name=client["name"], issuer=self.issuer)
+            payload.update(state=state, scope=scope, client_name=client["name"], issuer=self.issuer)
             db.execute("INSERT INTO oauth_requests VALUES(?,?,NULL,?,?)", (digest(request_id), self.store.encrypt(payload), now + REQUEST_TTL, client["id"]))
             db.execute("UPDATE oauth_clients SET last_used_at=? WHERE id=?", (now, client["id"]))
         return request_id
+
+    def _pending_request(self, db, request_id):
+        # Only token_urlsafe identifiers can exist, including for older requests.
+        row = None
+        if request_id.isascii():
+            row = db.execute("SELECT * FROM oauth_requests WHERE id_hash=?", (digest(request_id),)).fetchone()
+        if not row or row["expires_at"] <= time.time():
+            raise OAuthError("invalid_request", "Authorization request expired; restart from your AI client.", 404)
+        return row
+
+    def _consent_payload(self, row):
+        payload = self.store.decrypt(row["payload"])
+        if payload["issuer"] != self.issuer or payload["resource"] != self.resource:
+            raise OAuthError("invalid_target", "Service origin changed; restart authorization.")
+        return payload
 
     def consent_details(self, request_id, owner_binding):
         if not isinstance(request_id, str) or len(request_id) > 200:
             raise OAuthError("invalid_request", "Authorization request is invalid.", 404)
         with self.store.db() as db:
-            row = db.execute("SELECT * FROM oauth_requests WHERE id_hash=?", (digest(request_id),)).fetchone()
-            if not row or row["expires_at"] <= time.time():
-                raise OAuthError("invalid_request", "Authorization request expired; restart from your AI client.", 404)
+            row = self._pending_request(db, request_id)
             if row["owner_binding"] and not hmac.compare_digest(row["owner_binding"], owner_binding):
                 raise OAuthError("access_denied", "Authorization request belongs to another session.", 403)
-            payload = self.store.decrypt(row["payload"])
-            if payload["issuer"] != self.issuer or payload["resource"] != self.resource:
-                raise OAuthError("invalid_target", "Service origin changed; restart authorization.")
-            db.execute("UPDATE oauth_requests SET owner_binding=? WHERE id_hash=?", (owner_binding, digest(request_id)))
+            payload = self._consent_payload(row)
+            db.execute("UPDATE oauth_requests SET owner_binding=? WHERE id_hash=?", (owner_binding, row["id_hash"]))
             return {"request_id": request_id, "client_name": payload["client_name"],
-                    "redirect_uri": payload["redirect_uri"], "scope": SCOPE,
+                    "redirect_uri": payload["redirect_uri"], "scope": payload["scope"],
                     "resource": payload["resource"], "expires_at": timestamp(row["expires_at"])}
 
-    def decide_consent(self, request_id, approve, owner_binding):
+    def decide_consent(self, request_id, approve, owner_binding, user_id="owner"):
         if not isinstance(request_id, str) or len(request_id) > 200 or not isinstance(approve, bool):
             raise OAuthError("invalid_request", "Invalid consent decision.")
         with self.store.db() as db:
-            row = db.execute("SELECT * FROM oauth_requests WHERE id_hash=?", (digest(request_id),)).fetchone()
-            if not row or row["expires_at"] <= time.time():
-                raise OAuthError("invalid_request", "Authorization request expired; restart from your AI client.", 404)
+            row = self._pending_request(db, request_id)
             # A prior GET is required to bind the displayed consent to this owner session.
             if not row["owner_binding"] or not hmac.compare_digest(row["owner_binding"], owner_binding):
                 raise OAuthError("access_denied", "Read the consent request in this session before deciding.", 403)
-            payload = self.store.decrypt(row["payload"])
-            if payload["issuer"] != self.issuer or payload["resource"] != self.resource:
-                raise OAuthError("invalid_target", "Service origin changed; restart authorization.")
+            payload = self._consent_payload(row)
             client = db.execute("SELECT * FROM oauth_clients WHERE id=?", (payload["client_id"],)).fetchone()
             if not client or payload["redirect_uri"] not in self.store.decrypt(client["redirects"]):
                 raise OAuthError("invalid_request", "Client registration no longer exists.")
@@ -278,29 +310,37 @@ class OAuthServer:
             if payload["state"]:
                 response["state"] = payload["state"]
             if approve:
-                if db.execute("SELECT COUNT(*) FROM oauth_grants WHERE revoked=0 AND expires_at>?", (time.time(),)).fetchone()[0] >= MAX_GRANTS:
+                active = db.execute("SELECT COUNT(*) FROM oauth_grants WHERE user_id=? AND revoked=0 AND expires_at>?",
+                                    (user_id, time.time())).fetchone()[0]
+                if active >= MAX_GRANTS:
                     raise OAuthError("temporarily_unavailable", "Revoke an old application before adding another.", 429)
                 now, grant_id, code = time.time(), secrets.token_hex(16), "mhcode_" + secrets.token_urlsafe(32)
-                db.execute("INSERT INTO oauth_grants VALUES(?,?,?,?,?,NULL,?,0)",
-                           (grant_id, payload["client_id"], self.resource, SCOPE, now, now + REFRESH_TTL))
+                db.execute("""INSERT INTO oauth_grants (id,client_id,resource,scope,created_at,expires_at,user_id)
+                              VALUES(?,?,?,?,?,?,?)""",
+                           (grant_id, payload["client_id"], self.resource, payload["scope"], now, now + REFRESH_TTL, user_id))
                 db.execute("INSERT INTO oauth_codes VALUES(?,?,?,?,?,0)",
                            (digest(code), self.store.encrypt(payload), payload["client_id"], grant_id, now + CODE_TTL))
                 response["code"] = code
             else:
                 response["error"] = "access_denied"
-            db.execute("DELETE FROM oauth_requests WHERE id_hash=?", (digest(request_id),))
+            db.execute("DELETE FROM oauth_requests WHERE id_hash=?", (row["id_hash"],))
             return {"redirect_url": redirect_with_params(payload["redirect_uri"], response)}
 
-    def _issue_tokens(self, db, grant):
+    def _issue_tokens(self, db, grant, requested_scope):
+        access_scope = requested_scope or grant["scope"]
+        if not set(access_scope.split()).issubset(grant["scope"].split()):
+            raise OAuthError("invalid_scope", "Requested scope exceeds the approved grant.")
         now = time.time()
         access, refresh = "mha_" + secrets.token_urlsafe(32), "mhr_" + secrets.token_urlsafe(32)
         expires_in = min(ACCESS_TTL, max(0, int(grant["expires_at"] - now)))
         if expires_in <= 0:
             raise OAuthError("invalid_grant", "Authorization expired; authorize again.")
-        db.execute("INSERT INTO oauth_tokens VALUES(?,?,?,?,0)", (digest(access), grant["id"], "access", now + expires_in))
-        db.execute("INSERT INTO oauth_tokens VALUES(?,?,?,?,0)", (digest(refresh), grant["id"], "refresh", grant["expires_at"]))
+        db.execute("INSERT INTO oauth_tokens(token_hash,grant_id,kind,expires_at,scope) VALUES(?,?,?,?,?)",
+                   (digest(access), grant["id"], "access", now + expires_in, access_scope))
+        db.execute("INSERT INTO oauth_tokens(token_hash,grant_id,kind,expires_at,scope) VALUES(?,?,?,?,?)",
+                   (digest(refresh), grant["id"], "refresh", grant["expires_at"], grant["scope"]))
         return {"access_token": access, "token_type": "Bearer", "expires_in": expires_in,
-                "refresh_token": refresh, "scope": SCOPE}
+                "refresh_token": refresh, "scope": access_scope}
 
     def exchange(self, data, peer="unknown"):
         client_id = data.get("client_id", "")
@@ -310,8 +350,9 @@ class OAuthServer:
             raise OAuthError("invalid_target", "The resource must match the MCP endpoint exactly.")
         if data.get("client_secret") or data.get("client_assertion"):
             raise OAuthError("invalid_client", "This server accepts public clients using PKCE only.", 401)
-        if "scope" in data and not valid_scope(data["scope"]):
-            raise OAuthError("invalid_scope", "The only available scope is mail.read.")
+        requested_scope = normalized_scope(data.get("scope"))
+        if "scope" in data and not requested_scope:
+            raise OAuthError("invalid_scope", "Use mail.read, optionally with mail.reply.")
         self._consume_limits([("token:global", 1000, 600), ("token-peer:" + digest(peer), 200, 600)])
         with self.store.db() as db:
             if not db.execute("SELECT 1 FROM oauth_clients WHERE id=?", (client_id,)).fetchone():
@@ -343,19 +384,20 @@ class OAuthServer:
                     error = OAuthError("invalid_grant", "Authorization code already used; authorize again.")
                 else:
                     grant = db.execute("SELECT * FROM oauth_grants WHERE id=? AND revoked=0 AND expires_at>?", (row["grant_id"], now)).fetchone()
-                    if not grant or grant["resource"] != self.resource or grant["scope"] != SCOPE:
+                    if not grant or grant["resource"] != self.resource or grant["scope"] != payload["scope"]:
                         raise OAuthError("invalid_grant", "Authorization is no longer valid.")
                     db.execute("UPDATE oauth_codes SET used=1 WHERE code_hash=?", (digest(code),))
-                    response = self._issue_tokens(db, grant)
+                    response = self._issue_tokens(db, grant, requested_scope)
             elif grant_type == "refresh_token":
                 token = data.get("refresh_token", "")
                 if not isinstance(token, str) or len(token) > 200:
                     raise OAuthError("invalid_grant", "Invalid refresh token.")
-                row = db.execute("""SELECT t.*,g.client_id,g.resource,g.scope,g.revoked,g.expires_at AS grant_expires
+                row = db.execute("""SELECT t.*,g.client_id,g.resource,g.scope AS grant_scope,g.revoked,g.expires_at AS grant_expires
                                   FROM oauth_tokens t JOIN oauth_grants g ON g.id=t.grant_id
                                   WHERE t.token_hash=? AND t.kind='refresh'""", (digest(token),)).fetchone()
                 if (not row or row["client_id"] != client_id or row["resource"] != self.resource
-                        or row["scope"] != SCOPE or row["revoked"] or row["expires_at"] <= now or row["grant_expires"] <= now):
+                        or not valid_scope(row["scope"]) or row["scope"] != row["grant_scope"]
+                        or row["revoked"] or row["expires_at"] <= now or row["grant_expires"] <= now):
                     raise OAuthError("invalid_grant", "Invalid or expired refresh token.")
                 if row["used"]:
                     db.execute("UPDATE oauth_grants SET revoked=1 WHERE id=?", (row["grant_id"],))
@@ -365,7 +407,7 @@ class OAuthServer:
                     db.execute("UPDATE oauth_tokens SET used=1 WHERE token_hash=?", (digest(token),))
                     # Retire preceding access tokens when a family is refreshed.
                     db.execute("DELETE FROM oauth_tokens WHERE grant_id=? AND kind='access'", (grant["id"],))
-                    response = self._issue_tokens(db, grant)
+                    response = self._issue_tokens(db, grant, requested_scope)
             else:
                 raise OAuthError("unsupported_grant_type", "Only authorization_code and refresh_token are supported.")
             db.execute("UPDATE oauth_clients SET last_used_at=? WHERE id=?", (now, client_id))
@@ -374,21 +416,29 @@ class OAuthServer:
             raise error
         return response
 
-    def validate_access_token(self, token, resource=None):
+    def access_token_access(self, token, resource=None) -> tuple[str, str] | None:
         if not isinstance(token, str) or not token.startswith("mha_") or len(token) > 200:
-            return False
+            return None
         expected = resource or self.resource
         now = time.time()
         with self.store.db() as db:
-            row = db.execute("""SELECT t.grant_id,t.expires_at,g.resource,g.scope,g.revoked,
+            row = db.execute("""SELECT t.grant_id,t.expires_at,t.scope,g.resource,g.scope AS grant_scope,g.revoked,g.user_id,
                                g.expires_at AS grant_expires FROM oauth_tokens t
                                JOIN oauth_grants g ON g.id=t.grant_id
                                WHERE t.token_hash=? AND t.kind='access'""", (digest(token),)).fetchone()
             if (not row or row["expires_at"] <= now or row["grant_expires"] <= now or row["revoked"]
-                    or row["resource"] != expected or row["resource"] != self.resource or row["scope"] != SCOPE):
-                return False
+                    or row["resource"] != expected or row["resource"] != self.resource or not valid_scope(row["scope"])
+                    or not set(row["scope"].split()).issubset(row["grant_scope"].split())):
+                return None
             db.execute("UPDATE oauth_grants SET last_used_at=? WHERE id=?", (now, row["grant_id"]))
-            return True
+            return row["user_id"], row["scope"]
+
+    def access_token_owner(self, token, resource=None) -> str | None:
+        access = self.access_token_access(token, resource)
+        return access[0] if access else None
+
+    def validate_access_token(self, token, resource=None):
+        return self.access_token_owner(token, resource) is not None
 
     def revoke(self, token, client_id):
         if not isinstance(token, str) or not isinstance(client_id, str) or len(token) > 200 or len(client_id) > 200:
@@ -399,17 +449,19 @@ class OAuthServer:
             if row:
                 db.execute("UPDATE oauth_grants SET revoked=1 WHERE id=?", (row["id"],))
 
-    def grants(self):
+    def grants(self, user_id="owner"):
         with self.store.db() as db:
-            rows = db.execute("""SELECT g.id,c.name AS client_name,g.created_at,g.last_used_at
+            rows = db.execute("""SELECT g.id,c.name AS client_name,g.scope,g.created_at,g.last_used_at
                                FROM oauth_grants g JOIN oauth_clients c ON c.id=g.client_id
-                               WHERE g.revoked=0 AND g.expires_at>? ORDER BY g.created_at DESC""", (time.time(),))
-            return [{"id": row["id"], "client_name": row["client_name"], "created_at": timestamp(row["created_at"]),
+                               WHERE g.user_id=? AND g.revoked=0 AND g.expires_at>? ORDER BY g.created_at DESC""",
+                              (user_id, time.time()))
+            return [{"id": row["id"], "client_name": row["client_name"], "scope": row["scope"], "created_at": timestamp(row["created_at"]),
                      "last_used_at": timestamp(row["last_used_at"]) if row["last_used_at"] else None} for row in rows]
 
-    def revoke_grant(self, grant_id):
+    def revoke_grant(self, grant_id, user_id="owner"):
         with self.store.db() as db:
-            return bool(db.execute("UPDATE oauth_grants SET revoked=1 WHERE id=? AND revoked=0", (grant_id,)).rowcount)
+            return bool(db.execute("UPDATE oauth_grants SET revoked=1 WHERE id=? AND user_id=? AND revoked=0",
+                                   (grant_id, user_id)).rowcount)
 
     def _build_router(self):
         from fastapi import APIRouter, Request
@@ -429,23 +481,34 @@ class OAuthServer:
             session = self.owner_session(request) if callable(self.owner_session) else None
             if not session:
                 raise OAuthError("access_denied", "請先登入管理頁。", 401)
-            # External owner sessions supply their verified ID. Local owner sessions use the validated cookie.
+            # Older owner-only validators supplied the verified session without IAM fields.
+            user_id = session.get("user_id")
+            if "user_id" not in session and set(session) <= {"id", "csrf", "expires"}:
+                user_id = "owner"
             sid = session.get("id", request.cookies.get("mailharbor_session", ""))
-            if not isinstance(sid, str) or not sid:
+            if not isinstance(sid, str) or not sid or not isinstance(user_id, str) or not user_id:
                 raise OAuthError("access_denied", "請先登入管理頁。", 401)
             if request.method not in {"GET", "HEAD"}:
                 csrf = request.headers.get("x-csrf-token", "")
                 if (request.headers.get("origin") != self.issuer or not session.get("csrf")
                         or not csrf.isascii() or not hmac.compare_digest(csrf, session["csrf"])):
                     raise OAuthError("access_denied", "頁面驗證已過期，請重新整理。", 403)
-            return digest(sid)
+            # Preserve pending owner requests on upgrade. Include the user for member sessions.
+            binding_hash = digest(sid) if user_id == "owner" else digest(json.dumps([user_id, sid]))
+            return binding_hash, user_id
+
+        async def read_body(request, content_type):
+            if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != content_type:
+                raise OAuthError("invalid_request", f"Use {content_type}.")
+            raw = bytearray()
+            async for chunk in request.stream():
+                if len(raw) + len(chunk) > 16384:
+                    raise OAuthError("invalid_request", "Request body too large.", 413)
+                raw.extend(chunk)
+            return raw
 
         async def json_body(request):
-            if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
-                raise OAuthError("invalid_request", "Use application/json.")
-            raw = await request.body()
-            if len(raw) > 16384:
-                raise OAuthError("invalid_request", "Request body too large.", 413)
+            raw = await read_body(request, "application/json")
             try:
                 data = json.loads(raw)
                 if not isinstance(data, dict):
@@ -455,11 +518,7 @@ class OAuthServer:
                 raise OAuthError("invalid_request", "Malformed JSON request.") from None
 
         async def form_body(request):
-            if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/x-www-form-urlencoded":
-                raise OAuthError("invalid_request", "Use application/x-www-form-urlencoded.")
-            raw = await request.body()
-            if len(raw) > 16384:
-                raise OAuthError("invalid_request", "Request body too large.", 413)
+            raw = await read_body(request, "application/x-www-form-urlencoded")
             try:
                 values = parse_qs(raw.decode("utf-8"), keep_blank_values=True, max_num_fields=25)
                 if any(len(v) != 1 for v in values.values()):
@@ -472,14 +531,14 @@ class OAuthServer:
         @router.get("/.well-known/oauth-protected-resource/mcp")
         def protected_resource():
             return output({"resource": self.resource, "authorization_servers": [self.issuer],
-                           "scopes_supported": [SCOPE], "bearer_methods_supported": ["header"],
-                           "resource_name": "MailHarbor read-only email"})
+                           "scopes_supported": [SCOPE, REPLY_SCOPE], "bearer_methods_supported": ["header"],
+                           "resource_name": "MailHarbor email"})
 
         @router.get("/.well-known/oauth-authorization-server")
         def authorization_metadata():
             return output({"issuer": self.issuer, "authorization_endpoint": self.issuer + "/oauth/authorize",
                            "token_endpoint": self.issuer + "/oauth/token", "registration_endpoint": self.issuer + "/oauth/register",
-                           "revocation_endpoint": self.issuer + "/oauth/revoke", "scopes_supported": [SCOPE],
+                           "revocation_endpoint": self.issuer + "/oauth/revoke", "scopes_supported": [SCOPE, REPLY_SCOPE],
                            "response_types_supported": ["code"], "response_modes_supported": ["query"],
                            "grant_types_supported": ["authorization_code", "refresh_token"],
                            "token_endpoint_auth_methods_supported": ["none"], "revocation_endpoint_auth_methods_supported": ["none"],
@@ -511,16 +570,17 @@ class OAuthServer:
         @router.get("/api/oauth/consent")
         def get_consent(request: Request, request_id: str = ""):
             try:
-                return output(self.consent_details(request_id, binding(request)))
+                session_binding, _ = binding(request)
+                return output(self.consent_details(request_id, session_binding))
             except OAuthError as exc:
                 return failure(exc, owner=True)
 
         @router.post("/api/oauth/consent")
         async def consent(request: Request):
             try:
-                owner = binding(request)
+                session_binding, user_id = binding(request)
                 data = await json_body(request)
-                return output(self.decide_consent(data.get("request_id"), data.get("approve"), owner))
+                return output(self.decide_consent(data.get("request_id"), data.get("approve"), session_binding, user_id))
             except OAuthError as exc:
                 return failure(exc, owner=True)
 
@@ -545,16 +605,16 @@ class OAuthServer:
         @router.get("/api/oauth/grants")
         def grant_list(request: Request):
             try:
-                binding(request)
-                return output({"grants": self.grants()})
+                _, user_id = binding(request)
+                return output({"grants": self.grants(user_id)})
             except OAuthError as exc:
                 return failure(exc, owner=True)
 
         @router.delete("/api/oauth/grants/{grant_id}")
         def remove_grant(grant_id: str, request: Request):
             try:
-                binding(request)
-                if not self.revoke_grant(grant_id):
+                _, user_id = binding(request)
+                if not self.revoke_grant(grant_id, user_id):
                     raise OAuthError("invalid_request", "找不到授權應用程式。", 404)
                 return output({"ok": True})
             except OAuthError as exc:

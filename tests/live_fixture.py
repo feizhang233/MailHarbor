@@ -26,7 +26,8 @@ def create_fixture(data_dir, origin):
                         public_url=origin, data_dir=str(data_dir), sync_interval_seconds=86400)
     store = Store(data_dir, settings.key)
     credentials = {"email": "fixture@example.test", "username": "fixture@example.test", "password": "synthetic",
-                   "host": "imap.example.test", "port": 993, "folder": "INBOX"}
+                   "host": "imap.example.test", "port": 993, "folder": "INBOX",
+                   "smtp_host": "smtp.example.test", "smtp_port": 465}
     identity = {"email": "fixture@example.test", "provider_uid": "fixture@example.test"}
     account = store.save_account("custom", identity, credentials, "CI fixture mailbox")
 
@@ -35,15 +36,27 @@ def create_fixture(data_dir, origin):
             return []
         return [{"remote_id": "ci-fixture-mail", "subject": "CI fixture <script>window.__mailXss=1</script>",
                  "sender": "Fixture <sender@example.test>", "recipients": "fixture@example.test",
+                 "reply_recipients": ["replies@example.test"], "reply_message_id": "<fixture@example.test>",
                  "received_at": datetime.now(timezone.utc).isoformat(), "snippet": "Synthetic test message",
                  "body": '<img src=x onerror="window.__mailXss=1">\nCI fixture body. This is synthetic test data.',
                  "unread": True, "attachments": []}]
 
     providers._imap_open = Mock()
     providers._fetch_imap = fetch
+    accepted_bodies = set()
+
+    def accept_fixture_reply(provider, supplied, _settings, message, body, **_kwargs):
+        assert provider == "custom" and supplied["email"] == identity["email"]
+        assert message["reply_recipients"] == ["replies@example.test"]
+        assert body in ("CI reply\nSecond line", "CI bridge reply") and body not in accepted_bodies
+        accepted_bodies.add(body)
+
+    providers.send_reply = accept_fixture_reply
     store.replace_snapshot(account["id"], fetch(credentials, settings.sync_limit, settings.sync_days), credentials)
     token = store.create_token("CI stdio bridge")
-    return create_app(settings, store), {"password": password, "token": token["token"], "origin": origin}
+    reply_key = store.create_token("CI stdio reply", allow_reply=True)
+    return create_app(settings, store), {"password": password, "token": token["token"],
+                                        "reply_token": reply_key["token"], "origin": origin}
 
 
 if __name__ == "__main__":

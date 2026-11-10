@@ -2,10 +2,11 @@
 import base64
 import json
 import socket
-import ssl
 import time
 import unittest
 from datetime import datetime, timezone
+from email import policy
+from email.parser import BytesParser
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlsplit
@@ -25,7 +26,7 @@ CREDS = {"email": "person@example.com", "username": "person@example.com", "passw
          "host": "imap.example.com", "port": 993, "folder": "INBOX"}
 PUBLIC_DNS = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 993))]
 FIXED_CUTOFF = datetime(2026, 10, 1, 9, 0, tzinfo=timezone.utc)
-IMAP_HEADER = b"HEADER.FIELDS (SUBJECT FROM TO DATE MESSAGE-ID)"
+IMAP_HEADER = b"HEADER.FIELDS (SUBJECT FROM TO DATE MESSAGE-ID REPLY-TO REFERENCES IN-REPLY-TO)"
 
 
 def imap_literal(section, value):
@@ -43,6 +44,11 @@ class OAuthTests(unittest.TestCase):
             self.assertNotIn("SECRET", url)
             self.assertNotIn("Mail.ReadWrite", url)
             self.assertNotIn("gmail.modify", url)
+            send_scope = "https://www.googleapis.com/auth/gmail.send" if provider == "gmail" else "Mail.Send"
+            self.assertNotIn(send_scope, params["scope"][0].split())
+            enabled = p.oauth_authorize_url(provider, SETTINGS, "csrf-state", "pkce-challenge", allow_reply=True)
+            self.assertEqual(set(parse_qs(urlsplit(enabled).query)["scope"][0].split()),
+                             {*params["scope"][0].split(), send_scope})
         self.assertIn("select_account", p.oauth_authorize_url("gmail", SETTINGS, "s", "c"))
 
     def test_token_refresh_rotates_and_preserves_existing_refresh(self):
@@ -210,6 +216,15 @@ class ImapNetworkTests(unittest.TestCase):
         self.assertEqual(identity["email"], CREDS["email"])
         self.assertNotIn(CREDS["password"], json.dumps(identity))
 
+
+    def test_select_failure_keeps_its_error_when_logout_fails(self):
+        fake = MagicMock()
+        fake.select.return_value = ("NO", [])
+        fake.logout.side_effect = OSError("disconnected")
+        with patch.object(p, "_PinnedIMAPSSL", return_value=fake), self.assertRaisesRegex(p.ProviderError, "資料夾"):
+            p.probe_imap(CREDS)
+        fake.logout.assert_called_once_with()
+
     def test_imap_password_command_injection_rejected_before_connect(self):
         for field in ("username", "password", "folder"):
             for control in ("\r", "\n", "\x00"):
@@ -230,12 +245,175 @@ class ImapNetworkTests(unittest.TestCase):
         fake.select.assert_called_once_with('"&U,BTFw-"', readonly=True)
 
     def test_netease_sends_required_id_for_stdlib_string_capabilities(self):
-        fake = MagicMock()
-        fake.capabilities = ("IMAP4REV1", "ID")
-        fake.select.return_value = ("OK", [b"0"])
-        with patch.object(p, "_PinnedIMAPSSL", return_value=fake):
-            p.probe_imap(dict(CREDS, host="imap.163.com"))
-        fake._simple_command.assert_called_once_with("ID", '("name" "MailHarbor" "version" "1.0")')
+        for host in ("imap.163.com", "imap.126.com", "imap.yeah.net", "imap.vip.163.com", "imap.vip.126.com", "imap.188.com"):
+            with self.subTest(host=host), patch.object(p, "_PinnedIMAPSSL") as connect:
+                fake = connect.return_value
+                fake.capabilities = ("IMAP4REV1", "ID")
+                fake.select.return_value = ("OK", [b"0"])
+                p.probe_imap(dict(CREDS, host=host))
+                fake._simple_command.assert_called_once_with("ID", '("name" "MailHarbor" "version" "1.0")')
+
+
+class ReplyTests(unittest.TestCase):
+    def setUp(self):
+        self.original = {"remote_id": "provider/id", "account_email": "owner@example.test", "subject": "Re: 確認",
+                         "sender": "From <sender@example.test>", "recipients": "someone.else@example.test",
+                         "reply_recipients": ["reply@example.test"], "reply_thread_id": "conversation",
+                         "reply_message_id": "<original@example.test>", "reply_references": ["<root@example.test>"]}
+        self.credentials = {"allow_reply": True, "scope": "Mail.Read Mail.Send https://www.googleapis.com/auth/gmail.send",
+                            "access_token": "synthetic", "expires_at": time.time() + 3600}
+
+    def test_reply_to_precedence_and_malformed_headers(self):
+        sender = ("From", '"Example, From" <sender@example.test>')
+        self.assertEqual(p._reply_headers([sender])["reply_recipients"], ["sender@example.test"])
+        valid = ("Reply-To", '"Example, Reply" <reply@example.test>,\r\n other@example.test')
+        self.assertEqual(p._reply_headers([sender, valid])["reply_recipients"], ["reply@example.test", "other@example.test"])
+        for headers in [[("Reply-To", "")], [("Reply-To", "valid@example.test, bad@")],
+                        [("Reply-To", "reply@example.test\r\nBcc: hidden@example.test")], [valid, valid]]:
+            with self.subTest(headers=headers):
+                self.assertEqual(p._reply_headers([sender, *headers])["reply_recipients"], [])
+        self.assertEqual(p._graph_reply_recipients({"from": {"emailAddress": {"address": "from@example.test"}},
+                                                   "replyTo": [{"emailAddress": {"address": "to@example.test"}}]}), ["to@example.test"])
+        self.assertEqual(p._graph_reply_recipients({"from": {"emailAddress": {"address": "from@example.test"}}, "replyTo": [{}]}), [])
+
+    def test_legacy_grant_may_refresh_for_sync_and_requires_consent_to_send(self):
+        old = {"scope": "Mail.Read", "refresh_token": "old", "expires_at": 0}
+        with patch.object(p, "_request_json", return_value={"access_token": "new"}) as http:
+            updated = p._refresh("microsoft", old, SETTINGS)
+            self.assertNotIn("scope", http.call_args.kwargs["data"])
+        self.assertEqual(updated["scope"], "Mail.Read")
+        with patch.object(p, "_client") as client, self.assertRaises(p.ProviderError) as denied:
+            p.send_reply("microsoft", updated, SETTINGS, self.original, "body")
+        self.assertTrue(denied.exception.reauth_required)
+        client.assert_not_called()
+
+    def test_reply_requires_local_opt_in_and_actual_grant_including_after_refresh(self):
+        # Some providers return previously granted scopes even when this request only asked for read.
+        response = {"access_token": "new", "refresh_token": "refresh", "scope": "Mail.Read Mail.Send"}
+        with patch.object(p, "_request_json", return_value=response) as http:
+            read = p.oauth_exchange("microsoft", SETTINGS, "code", "verifier")
+            self.assertNotIn("Mail.Send", http.call_args.kwargs["data"]["scope"])
+            opted = p.oauth_exchange("microsoft", SETTINGS, "code", "verifier", allow_reply=True)
+            self.assertIn("Mail.Send", http.call_args.kwargs["data"]["scope"])
+            refreshed_read = p._refresh("microsoft", dict(read, expires_at=0), SETTINGS)
+        for blocked in (response, read, refreshed_read, dict(opted, scope="Mail.Read")):
+            self.assertEqual(p.reply_unavailable_reason("microsoft", blocked), "reauth_required")
+        self.assertIsNone(p.reply_unavailable_reason("microsoft", opted))
+
+    def test_legacy_cache_and_unsafe_destinations_are_blocked(self):
+        for recipients in (None, [], ["good@example.test,hidden@example.test"], ["a@example.test\nCc: misc@example.test"]):
+            original = dict(self.original, reply_recipients=recipients)
+            if recipients is None:
+                del original["reply_recipients"]
+            with self.subTest(recipients=recipients), patch.object(p, "_client") as client, self.assertRaises(p.ProviderError):
+                p.send_reply("gmail", self.credentials, SETTINGS, original, "body")
+            client.assert_not_called()
+
+    @unittest.skipIf(httpx is None, "httpx dependency is not installed")
+    def test_gmail_submits_attached_thread_and_plain_text_mime_to_approved_recipients(self):
+        observed = []
+        def handle(request):
+            observed.append(request)
+            return httpx.Response(200, json={"id": "sent-id"})
+        with patch.object(p, "_client", lambda: httpx.Client(transport=httpx.MockTransport(handle))):
+            p.send_reply("gmail", self.credentials, SETTINGS, dict(self.original, subject="確認"), "OK\n收到")
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(str(observed[0].url), "https://gmail.googleapis.com/gmail/v1/users/me/messages/send")
+        payload = json.loads(observed[0].content)
+        self.assertEqual(payload["threadId"], "conversation")
+        msg = BytesParser(policy=policy.default).parsebytes(base64.urlsafe_b64decode(payload["raw"]))
+        self.assertEqual(str(msg["To"]), "reply@example.test")
+        self.assertIsNone(msg["Cc"])
+        self.assertIsNone(msg["Bcc"])
+        self.assertEqual(str(msg["From"]), "owner@example.test")
+        self.assertEqual(str(msg["Subject"]), "確認")
+        self.assertEqual(str(msg["In-Reply-To"]), "<original@example.test>")
+        self.assertEqual(str(msg["References"]), "<root@example.test> <original@example.test>")
+        self.assertEqual(msg.get_content().strip().splitlines(), ["OK", "收到"])
+        self.assertEqual(msg.get_content_type(), "text/plain")
+
+    def test_gmail_missing_thread_headers_cannot_send_a_standalone_message(self):
+        for missing in ("reply_thread_id", "reply_message_id"):
+            original = dict(self.original)
+            del original[missing]
+            with self.subTest(missing=missing), patch.object(p, "_client") as network, self.assertRaises(p.ProviderError) as failed:
+                p.send_reply("gmail", self.credentials, SETTINGS, original, "body")
+            self.assertEqual(failed.exception.code, "thread_unavailable")
+            network.assert_not_called()
+
+    @unittest.skipIf(httpx is None, "httpx dependency is not installed")
+    def test_graph_empty_accepted_response_and_sanitized_send_outcomes(self):
+        observed = []
+        def handle(request):
+            observed.append(request)
+            return httpx.Response(202)
+        with patch.object(p, "_client", lambda: httpx.Client(transport=httpx.MockTransport(handle))):
+            p.send_reply("microsoft", self.credentials, SETTINGS, self.original, "<b>text</b>")
+        self.assertEqual(str(observed[0].url), "https://graph.microsoft.com/v1.0/me/messages/provider%2Fid/reply")
+        self.assertEqual(json.loads(observed[0].content)["message"],
+                         {"toRecipients": [{"emailAddress": {"address": "reply@example.test"}}],
+                          "body": {"contentType": "Text", "content": "<b>text</b>"}})
+        for response, code in [(403, "permission_denied"), (504, "delivery_unknown"), (0, "delivery_unknown")]:
+            def error(request):
+                if not response:
+                    raise httpx.ReadTimeout("private")
+                return httpx.Response(response, text="private")
+            with self.subTest(response=response), patch.object(p, "_client", lambda: httpx.Client(transport=httpx.MockTransport(error))), self.assertRaises(p.ProviderError) as failed:
+                p.send_reply("microsoft", self.credentials, SETTINGS, self.original, "body")
+            self.assertEqual(failed.exception.code, code)
+            self.assertNotIn("private", str(failed.exception))
+
+    def test_custom_smtp_is_opt_in_presets_use_fixed_hosts(self):
+        self.assertEqual(p.reply_unavailable_reason("custom", CREDS), "smtp_not_configured")
+        smtp = MagicMock()
+        smtp.mail.return_value = smtp.rcpt.return_value = smtp.data.return_value = (250, b"ok")
+        with patch.object(p, "_PinnedSMTP", return_value=smtp) as connect:
+            credentials = dict(CREDS, username="person", smtp_host="attacker.example", smtp_port=587)
+            p.send_reply("icloud", credentials, SETTINGS, self.original, "body")
+            connect.assert_called_once_with("smtp.mail.me.com", 587)
+            smtp.login.assert_called_once_with(credentials["email"], credentials["password"])
+            smtp.rcpt.assert_called_once_with("reply@example.test")
+            smtp.data.assert_called_once()
+            p.send_reply("custom", credentials, SETTINGS, self.original, "body")
+            connect.assert_called_with("attacker.example", 587)
+
+    def test_smtp_refuses_partial_delivery_and_handles_uncertain_data_result(self):
+        original = dict(self.original, reply_recipients=["first@example.test", "second@example.test"])
+        smtp = MagicMock()
+        smtp.mail.return_value = (250, b"ok")
+        smtp.rcpt.side_effect = [(250, b"ok"), (550, b"private")]
+        with patch.object(p, "_PinnedSMTP", return_value=smtp), self.assertRaises(p.ProviderError) as failed:
+            p.send_reply("qq", CREDS, SETTINGS, original, "body")
+        self.assertNotEqual(failed.exception.code, "delivery_unknown")
+        self.assertNotIn("private", str(failed.exception))
+        smtp.data.assert_not_called()
+        smtp.rcpt.side_effect = None
+        smtp.rcpt.return_value = (250, b"ok")
+        smtp.data.side_effect = p.smtplib.SMTPServerDisconnected("private password")
+        with patch.object(p, "_PinnedSMTP", return_value=smtp), self.assertRaises(p.ProviderError) as uncertain:
+            p.send_reply("qq", CREDS, SETTINGS, original, "body")
+        self.assertEqual(uncertain.exception.code, "delivery_unknown")
+        self.assertFalse(uncertain.exception.retryable)
+
+    def test_smtp_requires_pinned_public_dns_and_verified_tls_before_authentication(self):
+        for port in (465, 587):
+            with self.subTest(port=port), patch.object(p.socket, "getaddrinfo", return_value=[
+                    (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]), self.assertRaises(p.ProviderError):
+                p._PinnedSMTP("internal.example", port)
+        smtp = object.__new__(p._PinnedSMTP)
+        smtp._addresses = PUBLIC_DNS
+        smtp._tls = MagicMock()
+        with patch.object(p, "_pinned_socket") as pinned:
+            smtp._get_socket("smtp.example.test", 465, 10)
+            pinned.assert_called_once_with(PUBLIC_DNS, 10, "smtp.example.test", smtp._tls)
+        with patch.object(p, "_public_addresses", return_value=("smtp.example.test", PUBLIC_DNS)), \
+                patch.object(p.smtplib.SMTP, "__init__", return_value=None), patch.object(p._PinnedSMTP, "close"), \
+                patch.object(p._PinnedSMTP, "starttls", side_effect=p.smtplib.SMTPNotSupportedError("private")) as tls, \
+                patch.object(p._PinnedSMTP, "login") as login, self.assertRaises(p.ProviderError):
+            p.send_reply("icloud", CREDS, SETTINGS, self.original, "body")
+        tls.assert_called_once()
+        self.assertTrue(tls.call_args.kwargs["context"].check_hostname)
+        login.assert_not_called()
 
 
 class BodyParsingTests(unittest.TestCase):
@@ -329,7 +507,8 @@ class BodyParsingTests(unittest.TestCase):
             if query == "(BODYSTRUCTURE FLAGS INTERNALDATE)":
                 return "OK", [structure]
             if "HEADER.FIELDS" in query:
-                return "OK", [imap_literal(IMAP_HEADER, b"Subject: Sample\r\nFrom: a@example.com\r\nTo: b@example.com\r\n\r\n")]
+                return "OK", [imap_literal(IMAP_HEADER, b"Subject: Sample\r\nFrom: a@example.com\r\nTo: b@example.com\r\n"
+                                          b"Reply-To: Reply <other@example.com>\r\nReferences: <root@example.com>\r\nMessage-ID: <sample@example.com>\r\n\r\n")]
             if "BODY.PEEK[1]" in query:
                 return "OK", [imap_literal(b"1", b"Hello mail")]
             self.fail("unexpected fetch: " + query)
@@ -338,6 +517,9 @@ class BodyParsingTests(unittest.TestCase):
             messages = p._fetch_imap(CREDS, 200, 30)
         self.assertEqual(len(messages), 1)
         self.assertEqual(messages[0]["remote_id"], "12345:5")
+        self.assertEqual(messages[0]["reply_recipients"], ["other@example.com"])
+        self.assertEqual(messages[0]["reply_references"], ["<root@example.com>"])
+        self.assertEqual(messages[0]["reply_message_id"], "<sample@example.com>")
         self.assertEqual(messages[0]["body"], "Hello mail")
         self.assertTrue(messages[0]["unread"])
         self.assertFalse(messages[0]["body_truncated"])
@@ -427,6 +609,16 @@ class SnapshotTests(unittest.TestCase):
         return {"id": remote_id, "receivedDateTime": "2026-10-29T10:00:00Z",
                 "body": {"contentType": "text", "content": "Synthetic message"}}
 
+    def test_graph_malformed_collections_cannot_complete_a_snapshot(self):
+        for page in ({}, {"value": {}}, {"value": ["invalid"]}):
+            with self.subTest(page=page), patch.object(p, "_request_json", return_value=page):
+                with self.assertRaises(p.ProviderError):
+                    p._fetch_microsoft(None, {"access_token": "synthetic"}, 10, 30)
+                with self.assertRaises(p.ProviderError):
+                    p._graph_attachments(None, {}, "message")
+        with patch.object(p, "_request_json", return_value={"value": [{}]}), self.assertRaises(p.ProviderError):
+            p._fetch_microsoft(None, {"access_token": "synthetic"}, 10, 30)
+
     def test_graph_repeated_message_page_fails_instead_of_returning_partial_snapshot(self):
         next_url = "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$skiptoken=repeat"
         responses = [{"value": [self.graph_message("first")], "@odata.nextLink": next_url},
@@ -459,11 +651,15 @@ class SnapshotTests(unittest.TestCase):
 
     def test_graph_target_limit_finishes_without_following_unneeded_next_page(self):
         base = "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages"
-        with patch.object(p, "_request_json", return_value={"value": [self.graph_message("first")],
+        first = {**self.graph_message("first"), "from": {"emailAddress": {"address": "sender@example.test"}},
+                 "replyTo": [{"emailAddress": {"address": "reply@example.test"}}]}
+        with patch.object(p, "_request_json", return_value={"value": [first],
                                                            "@odata.nextLink": base}) as request, \
              patch.object(p, "_cutoff", return_value=FIXED_CUTOFF):
             messages = p._fetch_microsoft(None, {"access_token": "synthetic"}, 1, 30)
         self.assertEqual([m["remote_id"] for m in messages], ["first"])
+        self.assertIn("replyTo", request.call_args.kwargs["params"]["$select"].split(","))
+        self.assertEqual(messages[0]["reply_recipients"], ["reply@example.test"])
         self.assertEqual(request.call_count, 1)
 
     def test_graph_last_allowed_page_can_complete_the_snapshot(self):
@@ -498,11 +694,18 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(seen[0][1]["params"]["q"], "in:inbox after:" + str(int(FIXED_CUTOFF.timestamp())))
 
     def test_gmail_follows_empty_pages_and_replaces_deleted_candidates(self):
+        headers = [{"name": "From", "value": "From <from@example.com>"}, {"name": "Reply-To", "value": "reply@example.com"},
+                   {"name": "Message-ID", "value": "<id@example.com>"}]
+        remaining = self.gmail_message("remaining", payload={"mimeType": "text/plain", "headers": headers})
+        remaining["threadId"] = "thread"
         responses = [{"nextPageToken": "second"}, {"messages": [{"id": "removed"}], "nextPageToken": "third"},
-                     None, {"messages": [{"id": "remaining"}], "nextPageToken": "unused"}, self.gmail_message("remaining")]
+                     None, {"messages": [{"id": "remaining"}], "nextPageToken": "unused"}, remaining]
         with patch.object(p, "_request_json", side_effect=responses) as request, patch.object(p, "_cutoff", return_value=FIXED_CUTOFF):
             messages = p._fetch_gmail(None, {"access_token": "x"}, 1, 30)
         self.assertEqual([message["remote_id"] for message in messages], ["remaining"])
+        self.assertEqual(messages[0]["reply_recipients"], ["reply@example.com"])
+        self.assertEqual(messages[0]["reply_thread_id"], "thread")
+        self.assertEqual(messages[0]["reply_message_id"], "<id@example.com>")
         self.assertEqual(request.call_count, 5)
 
     def test_gmail_repeated_empty_page_rejects_incomplete_sync(self):
@@ -510,6 +713,24 @@ class SnapshotTests(unittest.TestCase):
             with self.assertRaises(p.ProviderError):
                 p._fetch_gmail(None, {"access_token": "x"}, 1, 30)
         self.assertEqual(request.call_count, 2)
+
+    def test_gmail_distinguishes_empty_and_malformed_collections(self):
+        for page in ({}, {"messages": []}):
+            with self.subTest(page=page), patch.object(p, "_request_json", return_value=page):
+                self.assertEqual(p._fetch_gmail(None, {"access_token": "x"}, 1, 30), [])
+        for items in ({}, "", None, False, ["invalid"]):
+            with self.subTest(items=items), patch.object(p, "_request_json", return_value={"messages": items}):
+                with self.assertRaises(p.ProviderError):
+                    p._fetch_gmail(None, {"access_token": "x"}, 1, 30)
+
+    def test_malformed_pagination_markers_cannot_end_a_snapshot(self):
+        for marker in ({}, [], False, 42):
+            for fetch, page in ((p._fetch_gmail, {"nextPageToken": marker}),
+                                (p._fetch_microsoft, {"value": [], "@odata.nextLink": marker})):
+                with self.subTest(marker=marker, provider=fetch.__name__), patch.object(p, "_request_json", return_value=page) as request:
+                    with self.assertRaises(p.ProviderError):
+                        fetch(None, {"access_token": "x"}, 1, 30)
+                    self.assertEqual(request.call_count, 1)
 
     def test_gmail_attachment_only_message_does_not_use_snippet_as_body(self):
         raw = self.gmail_message("one", payload={"mimeType": "text/plain", "filename": "notes.txt",

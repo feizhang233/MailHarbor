@@ -1,1 +1,1 @@
-"""MailHarbor: a personal, read-only mail gateway."""
+"""MailHarbor aggregates private mailboxes and supports permission-scoped replies."""

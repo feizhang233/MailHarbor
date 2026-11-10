@@ -3,21 +3,29 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import secrets
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 
-def normalize_origin(value: str) -> str:
+READ_SCOPE = "mail.read"
+REPLY_SCOPE = "mail.reply"
+READ_REPLY_SCOPE = f"{READ_SCOPE} {REPLY_SCOPE}"
+
+
+def normalize_origin(value: str, *, allow_loopback_http: bool = True) -> str:
     value = value.strip()
     if any(c.isspace() or ord(c) < 32 for c in value) or any(c in value for c in "\\\"'`$;{}"):
         raise ValueError("Public URL contains invalid characters")
     u = urlsplit(value)
-    if not u.hostname or u.username or u.password or u.path not in ("", "/") or u.query or u.fragment:
+    if not u.hostname or u.username is not None or u.path not in ("", "/") or "?" in value or "#" in value:
         raise ValueError("Public URL must be an origin without path or credentials")
     scheme = u.scheme.lower()
     host = u.hostname.encode("idna").decode("ascii").lower()
-    if scheme != "https" and not (scheme == "http" and host in ("localhost", "127.0.0.1", "::1")):
-        raise ValueError("Remote origins must use HTTPS")
+    if "*" in host:
+        raise ValueError("Public URL requires a specific host")
+    if scheme != "https" and not (allow_loopback_http and scheme == "http" and host in ("localhost", "127.0.0.1", "::1")):
+        raise ValueError("The service origin must use HTTPS")
     port = u.port
     if port == 0:
         raise ValueError("Invalid public URL port")
@@ -25,6 +33,19 @@ def normalize_origin(value: str) -> str:
     if port and port != (443 if scheme == "https" else 80):
         authority += f":{port}"
     return f"{scheme}://{authority}"
+
+
+def client_bearer_token(environment) -> str:
+    token = environment.get("MAILHUB_MCP_TOKEN", "")
+    if not (0 < len(token) <= 4096 and token.isascii() and token.isprintable() and " " not in token):
+        raise ValueError("Set a valid MAILHUB_MCP_TOKEN in the process environment.")
+    return token
+
+
+def make_hash(password: str, salt: bytes | None = None) -> str:
+    salt = salt or secrets.token_bytes(16)
+    derived = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1, dklen=64)
+    return salt.hex() + ":" + derived.hex()
 
 
 def verify_password(password: str, encoded: str) -> bool:
@@ -63,7 +84,9 @@ class Settings:
 
     @property
     def hostname(self) -> str:
-        return urlsplit(self.public_url).hostname or "localhost"
+        # TrustedHostMiddleware compares Host literals, including IPv6 brackets.
+        origin = urlsplit(self.public_url)
+        return origin.netloc if origin.port is None else origin.netloc.rsplit(":", 1)[0]
 
     @classmethod
     def from_env(cls):
@@ -71,7 +94,7 @@ class Settings:
         load_dotenv()
         return cls(
             key=os.getenv("MAILHUB_KEY", ""), admin_hash=os.getenv("MAILHUB_ADMIN_HASH", ""),
-            public_url=os.getenv("MAILHUB_PUBLIC_URL", "http://localhost:8080").rstrip("/"),
+            public_url=os.getenv("MAILHUB_PUBLIC_URL", "http://localhost:8080"),
             data_dir=os.getenv("MAILHUB_DATA_DIR", "./data"),
             sync_interval_seconds=int(os.getenv("MAILHUB_SYNC_SECONDS", "300")),
             sync_days=int(os.getenv("MAILHUB_SYNC_DAYS", "30")),

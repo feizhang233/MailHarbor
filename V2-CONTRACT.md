@@ -1,6 +1,6 @@
 # MailHarbor v0.2 work contract
 
-The v0.2 scope covers the settings frontend, AI connections, and bug fixes. Provider access stays read-only.
+The v0.2 scope covers the settings frontend, AI connections, and bug fixes. The current reply workflow and permissions are specified in CONTRACT.md.
 
 ## Ownership
 
@@ -27,8 +27,8 @@ All management APIs use existing session + X-CSRF-Token; API errors detail strin
 - `GET /.well-known/oauth-authorization-server`.
 - `POST /oauth/register` dynamic public client registration (exact safe HTTPS or loopback redirect URIs, limits, no client secrets, grant auth_code/refresh_token, S256 PKCE).
 - `GET /oauth/authorize` validates registered client/redirect/resource/scope/PKCE and queues authorization request; redirect to `/?oauth_request=opaque_id#connect`. No tokens or email data in URL. Owner logs in through portal if needed.
-- `GET /api/oauth/consent?request_id=...` -> `{request_id,client_name,redirect_uri,scope:'mail.read',resource,expires_at}` (owner session guarded by root middleware).
-- `POST /api/oauth/consent` body `{request_id,approve:bool}` -> `{redirect_url}`; owner/CSRF guarded. Approval is explicit user action naming requesting app, granting read-only access to all connected mailboxes. Deny routes OAuth error back.
+- `GET /api/oauth/consent?request_id=...` -> `{request_id,client_name,redirect_uri,scope:'mail.read'|'mail.read mail.reply',resource,expires_at}` (owner session guarded by root middleware).
+- `POST /api/oauth/consent` body `{request_id,approve:bool}` -> `{redirect_url}`; owner/CSRF guarded. Approval is explicit user action naming requesting app, granting the displayed permissions on the user’s connected mailboxes. Deny routes OAuth error back.
 - `POST /oauth/token` standard form-encoded code exchange/refresh with PKCE, exact redirect/client/resource; short-lived hashed access tokens; refresh rotation and revocation, no credentials leaked. Use stdlib parse_qs(await request.body()) to avoid optional multipart dependency.
 - `POST /oauth/revoke` revokes token family; valid caller bound to registered client; idempotent generic result.
 - `GET /api/oauth/grants` -> `{grants:[{id,client_name,created_at,last_used_at}]}`.

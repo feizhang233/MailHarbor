@@ -1,4 +1,4 @@
-"""A stdio facade for MailHarbor's authenticated, read-only remote MCP tools.
+"""A stdio facade for MailHarbor's authenticated, permission-scoped MCP tools.
 
 Only protocol messages go to stdout. Credentials come from the process
 environment, never command-line arguments or the plugin package.
@@ -10,33 +10,29 @@ import asyncio
 import logging
 import os
 import sys
-from urllib.parse import urlsplit
 
-ALLOWED_TOOLS = frozenset({"list_accounts", "search_emails", "read_email", "get_sync_status"})
+if __package__:
+    from .config import client_bearer_token, normalize_origin
+else:  # Direct invocation of this file.
+    from config import client_bearer_token, normalize_origin
+
+READ_TOOLS = frozenset({"list_accounts", "search_emails", "read_email", "get_sync_status"})
 
 
 def connection_settings(url: str | None = None, environ=None) -> tuple[str, str]:
     environment = os.environ if environ is None else environ
     endpoint = url or environment.get("MAILHUB_MCP_URL", "")
-    token = environment.get("MAILHUB_MCP_TOKEN", "")
-    parsed = urlsplit(endpoint)
-    if (not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment
-            or parsed.path.rstrip("/") != "/mcp" or any(ch.isspace() for ch in endpoint)):
-        raise ValueError("MAILHUB_MCP_URL must be an origin followed by /mcp, without credentials or query parameters.")
-    if parsed.scheme != "https" and not (
-        parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
-    ):
-        raise ValueError("The remote MCP endpoint must use HTTPS; HTTP is allowed only for loopback development.")
+    origin, _, service = endpoint.rstrip("/").rpartition("/")
+    if service != "mcp" or origin.endswith("/") or any(ch.isspace() for ch in endpoint):
+        raise ValueError("MAILHUB_MCP_URL must be a service origin followed by /mcp.")
     try:
-        _ = parsed.port
+        origin = normalize_origin(origin)
     except ValueError:
-        raise ValueError("The MCP endpoint has an invalid port.") from None
-    if not token or len(token) > 4096 or not token.isascii() or not token.isprintable() or any(ch.isspace() for ch in token):
-        raise ValueError("Set a nonempty MAILHUB_MCP_TOKEN in the bridge process environment.")
-    return endpoint.rstrip("/"), token
+        raise ValueError("Use an HTTPS origin without credentials, or loopback HTTP for development.") from None
+    return origin + "/mcp", client_bearer_token(environment)
 
 
-class ReadOnlyRemote:
+class MailHarborRemote:
     """Allowlist tools and preserve SDK result content, annotations and error flags."""
 
     def __init__(self, session):
@@ -45,25 +41,28 @@ class ReadOnlyRemote:
 
     async def list_tools(self):
         result = await self.session.list_tools()
-        # MailHarbor has four tools and does not need tool-list pagination.
         if result.nextCursor:
             raise ValueError("Unexpected paginated tool catalog from MailHarbor.")
         tools = {}
         for tool in result.tools:
-            if tool.name not in ALLOWED_TOOLS:
+            if tool.name == "reply_email":
+                if (not tool.annotations or tool.annotations.readOnlyHint is not False
+                        or tool.annotations.destructiveHint is not True or tool.annotations.openWorldHint is not True):
+                    raise ValueError("The reply tool must declare an external send operation.")
+            elif tool.name not in READ_TOOLS:
                 continue
-            if (not tool.annotations or tool.annotations.readOnlyHint is not True
+            elif (not tool.annotations or tool.annotations.readOnlyHint is not True
                     or tool.annotations.destructiveHint is True):
                 raise ValueError("The remote tool catalog did not declare read-only access.")
             tools[tool.name] = tool
-        if set(tools) != ALLOWED_TOOLS:
+        if not READ_TOOLS.issubset(tools):
             raise ValueError("The remote endpoint does not expose the expected MailHarbor tools.")
         self.tools = tools
         return list(tools.values())
 
     async def call_tool(self, name, arguments):
         if name not in self.tools:
-            raise ValueError("Tool is not in the read-only MailHarbor allowlist.")
+            raise ValueError("Tool is not available for this MailHarbor connection.")
         # ClientSession returns CallToolResult, preserving structuredContent,
         # content blocks and isError rather than flattening them to text.
         return await self.session.call_tool(name, arguments or {})
@@ -88,7 +87,7 @@ async def serve(endpoint: str, token: str) -> None:
     ) as (remote_read, remote_write, _):
         async with ClientSession(remote_read, remote_write) as session:
             await session.initialize()
-            remote = ReadOnlyRemote(session)
+            remote = MailHarborRemote(session)
             await remote.list_tools()
             server = Server("mailharbor-bridge")
 

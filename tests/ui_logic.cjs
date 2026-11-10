@@ -28,6 +28,12 @@ class Element {
   select() {}
 }
 const elements = Object.fromEntries([...html.matchAll(/id="([\w-]+)"/g)].map((match) => [match[1], new Element()]));
+const revealButtons = Object.fromEntries([...html.matchAll(/data-reveal="([\w-]+)"/g)].map(([, id]) => {
+  const button = new Element("button");
+  button.dataset.reveal = id;
+  elements[id].type = "password";
+  return [id, button];
+}));
 elements["ai-client"].value = "codex";
 elements["ai-auth"].value = "oauth";
 const document = {
@@ -35,17 +41,24 @@ const document = {
   hidden: false, title: "", activeElement: new Element("button"),
   getElementById: (id) => elements[id],
   createElement: (tag) => new Element(tag),
-  querySelector: () => new Element("button"),
-  querySelectorAll: (selector) => selector === "dialog[open]" ? Object.values(elements).filter((item) => item.open) : [],
+  querySelector: (selector) => revealButtons[/^\[data-reveal="([\w-]+)"\]$/.exec(selector)?.[1]] || new Element("button"),
+  querySelectorAll: (selector) => {
+    if (selector === "[data-reveal]") return Object.values(revealButtons);
+    if (selector === "dialog[open]") return Object.values(elements).filter((item) => item.open);
+    return [];
+  },
   addEventListener() {},
 };
 let authenticated = true;
+let sessionUser = { username: "admin", role: "admin" };
 let messagesForbidden = false;
+let accountsUnavailable = false;
 let calls = [];
 let assigned = [];
 let deferredToken = null;
 let deferredOAuth = null;
 let deferredSettingsRead = null;
+let consentScope = "mail.read";
 let grantRows = [{ id: "grant-1", client_name: "Test AI", created_at: "2026-10-29T08:00:00Z", last_used_at: null }];
 const settings = { public_url: "https://mail.example.test", sync_interval_seconds: 300, sync_days: 30, sync_limit: 200,
   google: { client_id: "google-test-id", secret_configured: true, redirect_uri: "https://mail.example.test/api/oauth/gmail/callback" },
@@ -62,6 +75,7 @@ const context = vm.createContext({
   fetch: async (url, options) => {
     calls.push({ url, options });
     const pathname = url.split("?")[0];
+    if (accountsUnavailable && pathname === "/api/accounts") return { ok: false, status: 503, json: async () => ({ detail: "Unavailable" }) };
     if (!authenticated && pathname !== "/api/session" && pathname !== "/api/login") return { ok: false, status: 401, json: async () => ({ detail: "Session expired" }) };
     if (messagesForbidden && pathname === "/api/messages") return { ok: false, status: 403, json: async () => ({ detail: "拒絕存取" }) };
     if (pathname === "/api/tokens" && options.method === "POST" && deferredToken) return deferredToken;
@@ -79,7 +93,7 @@ const context = vm.createContext({
     if (pathname.startsWith("/api/oauth/grants/") && options.method === "DELETE") grantRows = [];
     if (pathname === "/api/oauth/consent" && options.method === "POST") return { ok: true, status: 200, json: async () => ({ redirect_url: JSON.parse(options.body).approve ? "http://127.0.0.1:7777/callback?code=test-code" : "http://127.0.0.1:7777/callback?error=access_denied" }) };
     const responses = {
-      "/api/session": { authenticated, csrf_token: "csrf-test", public_url: "https://mail.example.test", sync_interval_seconds: 300, sync_days: 30, sync_limit: 200 },
+      "/api/session": { authenticated, user: sessionUser, csrf_token: "csrf-test", public_url: "https://mail.example.test", sync_interval_seconds: 300, sync_days: 30, sync_limit: 200 },
       "/api/providers": { providers: [{ id: "icloud", name: "iCloud", kind: "imap", host: "imap.mail.me.com", port: 993, note: "test", configured: true }] },
       "/api/accounts": { accounts: [account] },
       "/api/messages": { messages: [message], total: 1, coverage: { days: 30, per_account_limit: 200 } },
@@ -89,7 +103,7 @@ const context = vm.createContext({
       "/api/setup": { steps: [{ id: "service", title: "服務設定", complete: true, detail: "設定已載入，外部連線未驗證。" }, { id: "ai", title: "AI 讀取", complete: false, detail: "尚未取得客戶端讀取記錄。" }], ready: false, counts: { accounts: 1, tokens: 0 }, ai: { mcp_url: "https://mail.example.test/mcp", oauth_supported: true } },
       "/api/diagnostics": { checks: [{ id: "database", name: "資料庫", status: "pass", detail: "僅本機檢查" }], checked_at: "2026-10-29T08:00:00Z" },
       "/api/oauth/grants": { grants: grantRows },
-      "/api/oauth/consent": { request_id: "request-1", client_name: "<script>Untrusted AI</script>", redirect_uri: "http://127.0.0.1:7777/callback", scope: "mail.read", resource: "https://mail.example.test/mcp", expires_at: "2999-10-29T08:00:00Z" },
+      "/api/oauth/consent": { request_id: "request-1", client_name: "<script>Untrusted AI</script>", redirect_uri: "http://127.0.0.1:7777/callback", scope: consentScope, resource: "https://mail.example.test/mcp", expires_at: "2999-10-29T08:00:00Z" },
     };
     return { ok: true, status: 200, json: async () => responses[pathname] || { ok: true } };
   },
@@ -106,6 +120,18 @@ function flatten(element) { return String(element.textContent || "") + element.c
       assert.deepEqual((row[lang].match(/\{\d+\}/g) || []).sort(), (key.match(/\{\d+\}/g) || []).sort(), `Broken ${lang} placeholders: ${key}`);
     }
   }
+  for (const spec of Object.values(vm.runInContext("accessLists", context))) {
+    for (const field of ["createdLabel", "loading", "empty", "revoke", "title", "confirm", "success", "consequence"]) {
+      assert.ok(Object.hasOwn(catalog, spec[field]), `Missing access-list text: ${spec[field]}`);
+    }
+  }
+  for (const labels of Object.values(vm.runInContext("secretLabels", context))) {
+    for (const label of labels) assert.ok(Object.hasOwn(catalog, label), `Missing reveal label: ${label}`);
+  }
+  accountsUnavailable = true;
+  await context.testBoot();
+  assert.match(flatten(elements["accounts-list"]), /無法載入郵箱/, "Loading provider names must preserve the account retry state");
+  accountsUnavailable = false;
   await context.testBoot();
   await vm.runInContext("loadMessages()", context);
   assert.equal(elements["app-view"].hidden, false);
@@ -148,6 +174,8 @@ function flatten(element) { return String(element.textContent || "") + element.c
   assert.match(flatten(elements["accounts-list"]), /天數未記錄/);
   assert.match(flatten(elements["mail-list"]), /<script>bad\(\)<\/script>/);
   assert.equal(elements["mail-list"].children[0].tagName, "button");
+  const readerTrigger = elements["mail-list"].children[0];
+  readerTrigger.focus();
   await vm.runInContext('openMessage("m1")', context);
   assert.match(flatten(elements["reader-content"]), /此郵件僅同步部分內容/);
   assert.match(flatten(elements["reader-content"]), /<img src=x onerror=bad\(\)>/);
@@ -155,6 +183,8 @@ function flatten(element) { return String(element.textContent || "") + element.c
   message.sync = { last_sync: "2026-10-29T08:00:00Z", days: 7, per_account_limit: 50 };
   await vm.runInContext('openMessage("m1")', context);
   assert.match(flatten(elements["reader-content"]), /近 7 天 · 最多 50 封/);
+  vm.runInContext("closeReader()", context);
+  assert.equal(document.activeElement, readerTrigger, "Retrying the reader must retain its original focus target");
   assert.match(elements["coverage"].textContent, /近 30 天/, "Actual message snapshot must not alter the target");
   await vm.runInContext('api("/api/logout", {method: "POST"})', context);
   assert.equal(calls.at(-1).options.headers["X-CSRF-Token"], "csrf-test");
@@ -166,6 +196,20 @@ function flatten(element) { return String(element.textContent || "") + element.c
   assert.equal(elements["google-client-secret"].value, "");
   assert.equal(elements["google-configured"].textContent, "已儲存 Secret");
   assert.equal(elements["google-redirect"].value, settings.google.redirect_uri);
+  const googleReveal = revealButtons["google-client-secret"];
+  googleReveal.listeners.click();
+  assert.equal(elements["google-client-secret"].type, "text");
+  vm.runInContext('applyLanguage("en"); refreshInterfaceLanguage("zh-TW")', context);
+  assert.equal(googleReveal.attributes["aria-label"], "Hide Google client secret");
+  assert.equal(googleReveal.attributes["aria-pressed"], "true");
+  elements["clear-google-secret"].checked = true;
+  elements["clear-google-secret"].listeners.change();
+  assert.equal(elements["google-client-secret"].type, "password", "Clearing a revealed secret must mask future drafts");
+  assert.equal(googleReveal.attributes["aria-label"], "Show Google client secret");
+  assert.equal(googleReveal.attributes["aria-pressed"], "false");
+  elements["clear-google-secret"].checked = false;
+  elements["clear-google-secret"].listeners.change();
+  vm.runInContext('discardSettings(); applyLanguage("zh-TW"); refreshInterfaceLanguage("en")', context);
   const blankSettings = vm.runInContext("collectSettings()", context);
   assert.equal(Object.hasOwn(blankSettings, "google_client_secret"), false, "Blank secret must be omitted");
   elements["clear-google-secret"].checked = true;
@@ -190,15 +234,21 @@ function flatten(element) { return String(element.textContent || "") + element.c
   deferredSettingsRead = null;
   assert.equal(elements["sync-days"].value, "90", "A late reload must not replace the saved settings");
   assert.equal(elements["google-login"].disabled, false);
-  for (const client of ["codex", "cursor", "claude", "rest", "oauth"]) {
+  for (const client of ["codex", "cursor", "deepseek", "claude", "rest", "oauth"]) {
     elements["ai-client"].value = client;
     vm.runInContext("updateConnectionConfig()", context);
     assert.doesNotMatch(elements["codex-config"].textContent, /never-export-this-secret/);
     assert.match(elements["codex-config"].textContent, /mail\.example\.test/);
+    if (client === "deepseek") {
+      const example = fs.readFileSync(path.join(root, "integrations/deepseek-harness.cordis.yml.example"), "utf8");
+      assert.equal(elements["codex-config"].textContent, example.trimEnd().replace("https://mail.example.com/mcp", elements.endpoint.value));
+      assert.equal(elements["ai-auth"].value, "token");
+      assert.equal(elements["ai-auth"].disabled, true);
+    }
   }
   await vm.runInContext("runDiagnostics()", context);
   assert.match(flatten(elements["diagnostics-results"]), /僅本機檢查/);
-  await vm.runInContext("loadGrants()", context);
+  await vm.runInContext('loadAccessList("grants")', context);
   const revoke = elements["grants-list"].children[0].children[1];
   const deletesBefore = calls.filter((call) => call.options.method === "DELETE").length;
   revoke.listeners.click();
@@ -209,6 +259,11 @@ function flatten(element) { return String(element.textContent || "") + element.c
   const consentPostsBefore = calls.filter((call) => call.url === "/api/oauth/consent" && call.options.method === "POST").length;
   await vm.runInContext("loadConsent()", context);
   assert.match(flatten(elements["consent-details"]), /<script>Untrusted AI<\/script>/);
+  assert.equal(elements["consent-approve"].textContent, "允許唯讀存取");
+  consentScope = "mail.read mail.reply";
+  await vm.runInContext("loadConsent()", context);
+  assert.equal(elements["consent-approve"].textContent, "允許讀取與回覆");
+  assert.match(elements["consent-permissions"].textContent, /傳送郵件回覆/);
   assert.equal(calls.filter((call) => call.url === "/api/oauth/consent" && call.options.method === "POST").length, consentPostsBefore, "Loading consent must never approve it");
   assert.equal(vm.runInContext('safeOAuthRedirect("http://evil.test/callback")', context), null);
   assert.equal(vm.runInContext('safeOAuthRedirect("javascript:alert(1)")', context), null);
@@ -270,5 +325,31 @@ function flatten(element) { return String(element.textContent || "") + element.c
   assert.equal(vm.runInContext('t("設定")', context), "Paramètres");
   assert.equal(vm.runInContext('numberFormat.resolvedOptions().locale', context), "fr");
   assert.equal(vm.runInContext('dateFormat.resolvedOptions().timeZone', context), "Europe/Belgrade");
+  sessionUser = { username: "mail-reader", role: "member" };
+  calls = [];
+  context.location.hash = "#settings";
+  await vm.runInContext("enterApp()", context);
+  assert.equal(elements["workspace-username"].textContent, sessionUser.username);
+  assert.equal(elements["settings-form"].hidden, true);
+  assert.equal(elements["group-display"].hidden, false);
+  assert.equal(elements["category-service"].hidden, true);
+  assert(!calls.some((call) => call.url === "/api/settings"), "Member settings must not request global configuration");
+  vm.runInContext('state.providers.push({id:"gmail", name:"Gmail", kind:"oauth", configured:true}); location.hash="#accounts"; choosePage(); openAccount(); changeProvider("gmail")', context);
+  assert.equal(elements["account-dialog"].open, true);
+  assert.equal(elements["mailbox-oauth-pane"].hidden, false);
+  assert.equal(elements["mailbox-oauth-login"].disabled, false);
+  assert(!calls.some((call) => call.url === "/api/oauth/gmail/start"), "Choosing a provider does not initiate sign-in");
+  let releaseMemberOAuth;
+  deferredOAuth = new Promise((resolve) => { releaseMemberOAuth = resolve; });
+  const memberStart = vm.runInContext('startProviderLogin("gmail", $("mailbox-oauth-login"), $("mailbox-oauth-error"))', context);
+  vm.runInContext("closeAccount()", context);
+  const redirectsBefore = assigned.length;
+  releaseMemberOAuth({ok: true, json: async () => ({url:"https://oauth.example.test/abandoned-member"})});
+  await memberStart;
+  assert.equal(assigned.length, redirectsBefore, "Closing a member's mailbox dialog cancels its redirect");
+  vm.runInContext('openAccount(); changeProvider("gmail")', context);
+  deferredOAuth = Promise.resolve({ok: true, json: async () => ({url:"https://oauth.example.test/member"})});
+  await vm.runInContext('startProviderLogin("gmail", $("mailbox-oauth-login"), $("mailbox-oauth-error"))', context);
+  assert.equal(assigned.at(-1), "https://oauth.example.test/member");
   console.log("UI logic harness: passed (mail rendering, settings/secret rules, client configs, consent/revoke, CSRF, 401/403 and late-secret race)");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

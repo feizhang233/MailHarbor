@@ -2,9 +2,9 @@
 import hashlib
 import importlib.util
 import tempfile
+import threading
 import unittest
 from contextlib import contextmanager
-from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
@@ -23,8 +23,10 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(verify_password(PASSWORD, "broken"))
 
     def test_https_required_remotely(self):
-        for url in ("http://mail.example.com", "https://name:password@mail.example.com", "https://mail.example.com/path"):
-            with self.assertRaises(ValueError):
+        for url in ("http://mail.example.com", "https://name:password@mail.example.com", "https://@mail.example.com",
+                    "https://mail.example.com/path", "https://mail.example.com?", "https://mail.example.com/#",
+                    "https://*", "https://*.example.com"):
+            with self.subTest(url=url), self.assertRaises(ValueError):
                 Settings(key="test", admin_hash=ADMIN_HASH, public_url=url)
         self.assertTrue(Settings(key="test", admin_hash=ADMIN_HASH, public_url="https://mail.example.com").secure)
         self.assertFalse(Settings(key="test", admin_hash=ADMIN_HASH).secure)
@@ -224,6 +226,16 @@ class ApplicationTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/tokens", content=b"x" * 70000, headers=self.headers).status_code, 413)
         self.assertEqual(self.client.post("/api/oauth/microsoft/start", headers=self.headers).status_code, 503)
 
+    def test_loopback_ipv6_origin_matches_only_its_configured_host(self):
+        from dataclasses import replace
+        from fastapi.testclient import TestClient
+        from mailhub.app import create_app
+
+        origin = "http://[::1]:8080"
+        with TestClient(create_app(replace(self.settings, public_url=origin)), base_url=origin) as client:
+            self.assertEqual(client.get("/health").status_code, 200)
+            self.assertEqual(client.get("/health", headers={"Host": "[::2]:8080"}).status_code, 400)
+
     def test_oauth_state_is_session_bound_and_single_use(self):
         self.login()
         def start():
@@ -267,6 +279,23 @@ class ApplicationTests(unittest.TestCase):
             self.assertEqual(callback("gmail"), "/?connected=1")
             self.assertEqual(callback("gmail"), "/?connection_error=1")
             exchange.assert_called_once()
+
+    def test_mailbox_reply_permission_is_bound_to_each_oauth_request(self):
+        self.login()
+        endpoint = "/api/oauth/gmail"
+        pending = {}
+        for allow in (False, True):
+            start = self.client.post(endpoint + "/start", headers=self.headers, json={"allow_reply": allow})
+            params = parse_qs(urlsplit(start.json()["url"]).query)
+            self.assertEqual("https://www.googleapis.com/auth/gmail.send" in params["scope"][0].split(), allow)
+            pending[allow] = params["state"][0]
+        with patch("mailhub.providers.oauth_exchange", return_value={"refresh_token": "fixture"}) as exchange, \
+             patch("mailhub.providers.identify_oauth", return_value={"email": "a@example.test", "provider_uid": "a"}):
+            for allow in (True, False):
+                callback = self.client.get(endpoint + "/callback", follow_redirects=False,
+                                           params={"state": pending[allow], "code": "fixture", "allow_reply": not allow})
+                self.assertEqual(callback.headers["location"], "/?connected=1")
+                self.assertIs(exchange.call_args.kwargs["allow_reply"], allow)
 
     def test_multiple_mailboxes_per_oauth_provider_and_repeat_login(self):
         self.login()
@@ -315,6 +344,32 @@ class ApplicationTests(unittest.TestCase):
             self.assertEqual(response.status_code, 400)
             probe.assert_not_called()
 
+    def test_netease_address_defaults_and_custom_override(self):
+        self.login()
+        catalog = {p["id"]: p for p in self.client.get("/api/providers").json()["providers"]}
+        with patch("mailhub.providers._imap_open") as connect:
+            for provider, domain in (("163", "163.com"), ("126", "126.com"), ("yeah", "yeah.net"),
+                                     ("vip163", "vip.163.com"), ("vip126", "vip.126.com"), ("188", "188.com")):
+                with self.subTest(domain=domain):
+                    email = f"person@{domain.upper()}"
+                    response = self.client.post("/api/accounts/imap", headers=self.headers,
+                                                json={"email": email, "password": "fixture-code"})
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.json()["account"]["provider"], provider)
+                    self.assertEqual(catalog[provider]["email_domain"], domain)
+                    self.assertEqual(connect.call_args.args[0], {"email": email, "username": email, "password": "fixture-code",
+                                                                "host": f"imap.{domain}", "port": 993, "folder": "INBOX"})
+            response = self.client.post("/api/accounts/imap", headers=self.headers,
+                                        json={"provider": "custom", "email": "person@163.com", "host": "mail.example.test", "password": "fixture"})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["account"]["provider"], "custom")
+            self.assertEqual(connect.call_args.args[0]["host"], "mail.example.test")
+        with patch("mailhub.providers.socket.getaddrinfo") as resolve:
+            for email in ("person@163.com.example.test", "person@example.test@163.com", "@163.com"):
+                response = self.client.post("/api/accounts/imap", headers=self.headers, json={"email": email, "password": "fixture"})
+                self.assertEqual(response.status_code, 400, email)
+            resolve.assert_not_called()
+
     def test_adding_another_imap_mailbox_uses_its_own_server_and_credentials(self):
         self.login()
         mailboxes = [
@@ -359,6 +414,37 @@ class ApplicationTests(unittest.TestCase):
         payload["clear_google_secret"] = True
         response = self.client.post("/api/settings", headers=self.headers, json=payload)
         self.assertFalse(response.json()["google"]["secret_configured"])
+
+    def test_settings_update_resyncs_a_busy_mailbox_once(self):
+        self.login()
+        store = self.app.state.store
+        account = store.save_account("custom", {"provider_uid": "fixture", "email": "fixture@example.test"}, {})
+        started, release, refreshed = threading.Event(), threading.Event(), threading.Event()
+        ranges = []
+
+        def fetch(provider, credentials, settings, *, limit, days, **kwargs):
+            ranges.append((days, limit))
+            if len(ranges) == 1:
+                started.set()
+                if not release.wait(5):
+                    raise RuntimeError("Timed out waiting for settings update")
+            else:
+                refreshed.set()
+            return [], credentials
+
+        with patch("mailhub.providers.fetch_messages", side_effect=fetch), \
+             patch.object(store, "all_account_ids", wraps=store.all_account_ids) as scan:
+            response = self.client.post(f"/api/accounts/{account['id']}/sync", headers=self.headers)
+            self.assertEqual(response.status_code, 202)
+            try:
+                self.assertTrue(started.wait(3))
+                updated = {"sync_interval_seconds": 120, "sync_days": 7, "sync_limit": 50}
+                self.client.post("/api/settings", headers=self.headers, json=updated).raise_for_status()
+            finally:
+                release.set()
+            self.assertTrue(refreshed.wait(3))
+            self.assertEqual(ranges, [(30, 200), (7, 50)])
+            self.assertEqual(scan.call_count, 1)
 
     def test_rest_bearer_only_and_openapi_excludes_management(self):
         self.login()

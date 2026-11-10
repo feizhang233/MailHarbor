@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from mailhub.oauth_server import OAuthError, OAuthServer, SCOPE, digest, pkce_challenge, valid_redirect_uri, valid_scope
+from mailhub.config import READ_REPLY_SCOPE
 
 
 class OAuthValidationTests(unittest.TestCase):
@@ -24,7 +25,8 @@ class OAuthValidationTests(unittest.TestCase):
 
     def test_scope_does_not_escalate(self):
         self.assertTrue(valid_scope("mail.read"))
-        for scope in ("", "openid", "mail.read mail.write", "mail.read mail.read", [], None):
+        self.assertTrue(valid_scope("mail.reply mail.read"))
+        for scope in ("", "openid", "mail.reply", "mail.read mail.write", "mail.read mail.read", [], None):
             self.assertFalse(valid_scope(scope))
 
     def test_redirect_rejects_invalid_unicode(self):
@@ -77,11 +79,11 @@ class OAuthStateMachineTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def get_code(self):
+    def get_code(self, scope=SCOPE):
         request_id = self.server.begin_authorization({"client_id": self.client, "redirect_uri": self.redirect,
             "resource": self.server.resource, "response_type": "code", "code_challenge_method": "S256",
-            "code_challenge": pkce_challenge(self.verifier), "scope": SCOPE, "state": "state"})
-        self.server.consent_details(request_id, "owner")
+            "code_challenge": pkce_challenge(self.verifier), "scope": scope, "state": "state"})
+        self.assertEqual(self.server.consent_details(request_id, "owner")["scope"], scope)
         response = self.server.decide_consent(request_id, True, "owner")
         return parse_qs(urlsplit(response["redirect_url"]).query)["code"][0]
 
@@ -109,6 +111,46 @@ class OAuthStateMachineTests(unittest.TestCase):
             self.get_pair(code)
         self.assertFalse(self.server.validate_access_token(pair["access_token"]))
 
+    def test_narrowed_access_scope_and_refresh_escalation_protection(self):
+        pair = self.get_pair(self.get_code(READ_REPLY_SCOPE))
+        self.assertEqual(self.server.access_token_access(pair["access_token"]), ("owner", READ_REPLY_SCOPE))
+        self.assertEqual(self.server.grants()[0]["scope"], READ_REPLY_SCOPE)
+        refresh = {"grant_type": "refresh_token", "client_id": self.client, "resource": self.server.resource}
+        read_access = self.server.exchange({**refresh, "refresh_token": pair["refresh_token"], "scope": SCOPE})
+        self.assertEqual(self.server.access_token_access(read_access["access_token"]), ("owner", SCOPE))
+        self.assertEqual(read_access["scope"], SCOPE)
+        full = self.server.exchange({**refresh, "refresh_token": read_access["refresh_token"]})
+        self.assertEqual(full["scope"], READ_REPLY_SCOPE)
+        read = self.get_pair()
+        with self.assertRaises(OAuthError) as caught:
+            self.server.exchange({**refresh, "refresh_token": read["refresh_token"], "scope": READ_REPLY_SCOPE})
+        self.assertEqual(caught.exception.error, "invalid_scope")
+        self.assertEqual(self.server.exchange({**refresh, "refresh_token": read["refresh_token"]})["scope"], SCOPE)
+
+    def test_read_only_registration_and_code_cannot_be_upgraded(self):
+        self.client = self.server.register({"redirect_uris": [self.redirect], "scope": SCOPE})["client_id"]
+        with self.assertRaises(OAuthError) as caught:
+            self.get_code(READ_REPLY_SCOPE)
+        self.assertEqual(caught.exception.error, "invalid_scope")
+        code = self.get_code()
+        with self.assertRaises(OAuthError) as caught:
+            self.server.exchange({"grant_type": "authorization_code", "client_id": self.client,
+                "code": code, "code_verifier": self.verifier, "redirect_uri": self.redirect,
+                "resource": self.server.resource, "scope": READ_REPLY_SCOPE})
+        self.assertEqual(caught.exception.error, "invalid_scope")
+        self.assertEqual(self.get_pair(code)["scope"], SCOPE)
+
+    def test_broad_registration_alone_grants_only_read_by_default(self):
+        client = self.server.register({"redirect_uris": [self.redirect], "scope": "mail.reply mail.read"})
+        self.assertEqual(client["scope"], READ_REPLY_SCOPE)
+        request = self.server.begin_authorization({"client_id": client["client_id"], "redirect_uri": self.redirect,
+            "resource": self.server.resource, "response_type": "code", "code_challenge_method": "S256",
+            "code_challenge": pkce_challenge(self.verifier)})
+        self.assertEqual(self.server.consent_details(request, "session")["scope"], SCOPE)
+        self.server.decide_consent(request, True, "session", user_id="member")
+        self.assertEqual(self.server.grants("member")[0]["scope"], SCOPE)
+        self.assertEqual(self.server.grants("owner"), [])
+
     def test_invalid_requests_consume_committed_limits(self):
         with self.store.db() as db:
             db.execute("INSERT INTO oauth_limits VALUES(?,?,119)", ("token-client:" + digest(self.client), time.time()))
@@ -132,6 +174,23 @@ class OAuthStateMachineTests(unittest.TestCase):
             self.server._prune(db, time.time())
             self.assertIsNotNone(db.execute("SELECT id FROM oauth_clients WHERE id=?", (self.client,)).fetchone())
             self.assertIsNone(db.execute("SELECT id FROM oauth_clients WHERE id=?", (extra,)).fetchone())
+
+    def test_existing_grants_and_refresh_tokens_migrate_to_owner(self):
+        pair = self.get_pair()
+        with self.store.db() as db:
+            db.execute("DROP INDEX oauth_grants_user")
+            db.execute("ALTER TABLE oauth_grants DROP COLUMN user_id")
+            db.execute("ALTER TABLE oauth_tokens DROP COLUMN scope")
+            db.execute("ALTER TABLE oauth_clients DROP COLUMN scope")
+        with patch.object(OAuthServer, "_build_router", return_value=None):
+            server = OAuthServer(self.settings, self.store)
+        self.assertEqual(server.access_token_owner(pair["access_token"]), "owner")
+        self.assertEqual(len(server.grants("owner")), 1)
+        self.assertEqual(server.grants("member"), [])
+        rotated = server.exchange({"grant_type": "refresh_token", "client_id": self.client,
+                                   "refresh_token": pair["refresh_token"], "resource": server.resource})
+        self.assertEqual(server.access_token_owner(rotated["access_token"]), "owner")
+        self.assertEqual(server.access_token_access(rotated["access_token"]), ("owner", SCOPE))
 
 
 @unittest.skipUnless(HAS_RUNTIME, "OAuth ASGI/storage dependencies are not installed")
@@ -198,6 +257,7 @@ class OAuthServerTests(unittest.TestCase):
         metadata = self.client.get("/.well-known/oauth-authorization-server").json()
         self.assertEqual(metadata["issuer"], self.settings.public_url)
         self.assertEqual(metadata["code_challenge_methods_supported"], ["S256"])
+        self.assertCountEqual(metadata["scopes_supported"], ["mail.read", "mail.reply"])
         self.assertTrue(metadata["authorization_response_iss_parameter_supported"])
         self.assertNotIn("client_id_metadata_document_supported", metadata)
         protected = self.client.get("/.well-known/oauth-protected-resource/mcp").json()
@@ -358,6 +418,37 @@ class OAuthServerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(self.server.validate_access_token(pair["access_token"]))
 
+    def test_grant_approval_limits_revocation_and_tokens_are_user_scoped(self):
+        sessions = {"owner-one": {"user_id": "owner", "csrf": "csrf-test"},
+                    "member-session": {"user_id": "member-id", "csrf": "csrf-test"}}
+        self.server.owner_session = lambda request: sessions.get(request.cookies.get("mailharbor_session"))
+        with patch("mailhub.oauth_server.MAX_GRANTS", 1):
+            owner_key = self.token_pair()["access_token"]
+            owner_grant = self.client.get("/api/oauth/grants").json()["grants"][0]["id"]
+            self.client.cookies.set("mailharbor_session", "member-session")
+            self.assertEqual(self.client.get("/api/oauth/grants").json()["grants"], [])
+            self.assertEqual(self.client.delete("/api/oauth/grants/" + owner_grant, headers=self.headers).status_code, 404)
+            member = self.token_pair()
+            extra_request = self.begin()
+            self.client.get("/api/oauth/consent", params={"request_id": extra_request}).raise_for_status()
+            limited = self.client.post("/api/oauth/consent", json={"request_id": extra_request, "approve": True},
+                                       headers=self.headers)
+            self.assertEqual(limited.status_code, 429)
+        member_grants = self.client.get("/api/oauth/grants").json()["grants"]
+        self.assertEqual(len(member_grants), 1)
+        self.assertNotEqual(member_grants[0]["id"], owner_grant)
+        self.assertEqual(self.server.access_token_owner(member["access_token"]), "member-id")
+        self.assertIsNone(self.server.access_token_owner(member["refresh_token"]))
+        refresh = self.client.post("/oauth/token", data={"grant_type": "refresh_token", "client_id": self.client_id,
+                                   "resource": self.server.resource, "refresh_token": member["refresh_token"]})
+        refresh.raise_for_status()
+        member_key = refresh.json()["access_token"]
+        self.assertEqual(self.server.access_token_owner(member_key), "member-id")
+        self.assertIsNone(self.server.access_token_owner(member["access_token"]))
+        self.client.delete("/api/oauth/grants/" + member_grants[0]["id"], headers=self.headers).raise_for_status()
+        self.assertIsNone(self.server.access_token_owner(member_key))
+        self.assertEqual(self.server.access_token_owner(owner_key), "owner")
+
     def test_form_content_type_duplicate_and_secret_auth_rejected(self):
         self.assertEqual(self.client.post("/oauth/token", json={}).status_code, 400)
         response = self.client.post("/oauth/token", content="client_id=a&client_id=b", headers={"Content-Type": "application/x-www-form-urlencoded"})
@@ -365,8 +456,30 @@ class OAuthServerTests(unittest.TestCase):
         response = self.client.post("/oauth/token", data={"client_id": self.client_id}, headers={"Authorization": "Basic Zm9vOmJhcg=="})
         self.assertEqual(response.status_code, 401)
 
+    def test_oauth_body_limits_and_invalid_consent_id(self):
+        for url, content_type in (("/oauth/register", "application/json"),
+                                  ("/oauth/token", "application/x-www-form-urlencoded")):
+            response = self.client.post(url, content=b"x" * 16385, headers={"Content-Type": content_type})
+            self.assertEqual(response.status_code, 413)
+        decision = self.client.post("/api/oauth/consent", headers={**self.headers, "Content-Type": "application/json"},
+                                    content=b'{"request_id":"\\ud800","approve":true}')
+        self.assertEqual(decision.status_code, 404)
+
     def test_router_without_owner_validator_fails_closed(self):
         self.server.owner_session = None
+        self.assertEqual(self.client.get("/api/oauth/grants").status_code, 401)
+
+    def test_iam_session_cannot_assume_a_different_consenting_user(self):
+        session = {"user_id": "member-one", "role": "member", "id": "verified-session", "csrf": "csrf-test"}
+        self.server.owner_session = lambda request: session
+        request_id = self.begin()
+        self.client.get("/api/oauth/consent", params={"request_id": request_id}).raise_for_status()
+        session["user_id"] = "member-two"
+        decision = {"request_id": request_id, "approve": True}
+        self.assertEqual(self.client.post("/api/oauth/consent", json=decision, headers=self.headers).status_code, 403)
+        del session["user_id"]
+        self.assertEqual(self.client.get("/api/oauth/grants").status_code, 401)
+        session["user"] = {"username": "reader", "role": session.pop("role")}
         self.assertEqual(self.client.get("/api/oauth/grants").status_code, 401)
 
     def test_non_ascii_csrf_header_is_forbidden_without_revoking_grant(self):

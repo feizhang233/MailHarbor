@@ -1,8 +1,4 @@
-"""Read-only mail adapters. Provider data is untrusted; credentials never enter errors.
-
-Only a bounded recent folder snapshot is synchronized. Attachments are metadata only.
-IMAP credentials are not inherently read-only, so this module never exposes mutations.
-"""
+"""Bounded inbox snapshots and plain-text replies to a specific cached message."""
 from __future__ import annotations
 
 import base64
@@ -12,14 +8,18 @@ import imaplib
 import ipaddress
 import json
 import re
+import smtplib
 import socket
 import ssl
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email import policy
+from email.errors import HeaderParseError, NonASCIILocalPartDefect
 from email.header import decode_header, make_header
+from email.message import EmailMessage
 from email.parser import BytesParser
-from email.utils import parsedate_to_datetime
+from email.utils import format_datetime, make_msgid, parsedate_to_datetime
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
@@ -40,31 +40,59 @@ class ProviderError(Exception):
         self.reauth_required = reauth_required
 
 
+_NETEASE_FREE_GUIDE = "https://help.mail.126.com/faqDetail.do?code=d7a5dc8471cd0c0e8b4b8f4f8e49998b374173cfe9171305fa1ce630d7f67ac2a5feb28b66796d3b"
+_NETEASE_VIP_GUIDE = "https://help.vip.188.com/faqDetail.do?code=d7a5dc8471cd0c0e8b4b8f4f8e49998b374173cfe9171305fa1ce630d7f67ac205fa9c38aad06acb"
+_NETEASE = {
+    "163": ("網易 163", "163.com", _NETEASE_FREE_GUIDE),
+    "126": ("網易 126", "126.com", _NETEASE_FREE_GUIDE),
+    "yeah": ("網易 Yeah", "yeah.net", _NETEASE_FREE_GUIDE),
+    "vip163": ("網易 VIP 163", "vip.163.com", _NETEASE_VIP_GUIDE),
+    "vip126": ("網易 VIP 126", "vip.126.com", _NETEASE_VIP_GUIDE),
+    "188": ("網易 188", "188.com", _NETEASE_VIP_GUIDE),
+}
+_NETEASE_HOSTS = {f"imap.{domain}" for _, domain, _ in _NETEASE.values()}
+
+
+@dataclass(frozen=True)
+class _ImapPreset:
+    name: str
+    host: str
+    smtp_host: str
+    note: str
+    guide_url: str
+    smtp_port: int = 465
+    email_domain: str = ""
+
+
 _PRESETS = {
-    "icloud": ("iCloud Mail", "imap.mail.me.com", "使用 Apple App 專用密碼，需啟用雙重認證。", "https://support.apple.com/102525"),
-    "qq": ("QQ 郵箱", "imap.qq.com", "先開啟 IMAP，使用郵箱授權碼。", "https://help.mail.qq.com/detail/106/985"),
-    "qq_enterprise": ("騰訊企業郵箱", "imap.exmail.qq.com", "需管理員允許 IMAP；依帳號安全設定使用客戶端授權碼。", "https://exmail.qq.com/"),
-    "163": ("網易 163", "imap.163.com", "先開啟 IMAP，使用客戶端授權碼；以帳號內設定為準。", "https://help.mail.163.com/"),
-    "126": ("網易 126", "imap.126.com", "先開啟 IMAP，使用客戶端授權碼；以帳號內設定為準。", "https://help.mail.163.com/"),
-    "yeah": ("網易 Yeah", "imap.yeah.net", "先開啟 IMAP，使用客戶端授權碼；以帳號內設定為準。", "https://help.mail.163.com/"),
-    "yahoo": ("Yahoo Mail", "imap.mail.yahoo.com", "使用 Yahoo App password。", "https://help.yahoo.com/kb/SLN4075.html"),
-    "aol": ("AOL Mail", "imap.aol.com", "使用 AOL App password。", "https://help.aol.com/articles/how-do-i-use-other-email-applications-to-send-and-receive-my-aol-mail"),
-    "fastmail": ("Fastmail", "imap.fastmail.com", "使用 App password；Basic 方案不含 IMAP。", "https://www.fastmail.help/hc/en-us/articles/1500000278342-Server-names-and-ports"),
-    "zoho": ("Zoho Mail", "imap.zoho.com", "需開啟 IMAP；付費企業版或不同資料中心可能需用自訂主機。新免費方案可能不支援。", "https://www.zoho.com/mail/help/imap-access.html"),
-    "gmx": ("GMX", "imap.gmx.com", "先開啟 IMAP；地區帳號請核對官方主機設定。", "https://support.gmx.com/pop-imap/imap/server.html"),
-    "custom": ("其他 IMAP 郵箱", "", "輸入公開 IMAP 主機；僅支援 993 TLS。內網與 Proton Bridge 暫不支援。", ""),
+    "icloud": _ImapPreset("iCloud Mail", "imap.mail.me.com", "smtp.mail.me.com", "使用 Apple App 專用密碼，需啟用雙重認證。", "https://support.apple.com/102525", smtp_port=587),
+    "qq": _ImapPreset("QQ 郵箱", "imap.qq.com", "smtp.qq.com", "先開啟 IMAP，使用郵箱授權碼。", "https://help.mail.qq.com/detail/106/985"),
+    "qq_enterprise": _ImapPreset("騰訊企業郵箱", "imap.exmail.qq.com", "smtp.exmail.qq.com", "需管理員允許 IMAP；依帳號安全設定使用客戶端授權碼。", "https://exmail.qq.com/"),
+    **{key: _ImapPreset(name, f"imap.{domain}", f"smtp.{domain}", "先開啟 IMAP，使用客戶端授權碼；以帳號內設定為準。", guide, email_domain=domain)
+       for key, (name, domain, guide) in _NETEASE.items()},
+    "yahoo": _ImapPreset("Yahoo Mail", "imap.mail.yahoo.com", "smtp.mail.yahoo.com", "使用 Yahoo App password。", "https://help.yahoo.com/kb/SLN4075.html"),
+    "aol": _ImapPreset("AOL Mail", "imap.aol.com", "smtp.aol.com", "使用 AOL App password。", "https://help.aol.com/articles/how-do-i-use-other-email-applications-to-send-and-receive-my-aol-mail"),
+    "fastmail": _ImapPreset("Fastmail", "imap.fastmail.com", "smtp.fastmail.com", "使用 App password；Basic 方案不含 IMAP。", "https://www.fastmail.help/hc/en-us/articles/1500000278342-Server-names-and-ports"),
+    "zoho": _ImapPreset("Zoho Mail", "imap.zoho.com", "smtp.zoho.com", "需開啟 IMAP；付費企業版或不同資料中心可能需用自訂主機。新免費方案可能不支援。", "https://www.zoho.com/mail/help/imap-access.html"),
+    "gmx": _ImapPreset("GMX", "imap.gmx.com", "mail.gmx.com", "先開啟 IMAP；地區帳號請核對官方主機設定。", "https://support.gmx.com/pop-imap/imap/server.html"),
+    "custom": _ImapPreset("其他 IMAP 郵箱", "", "", "輸入公開 IMAP 主機；僅支援 993 TLS。內網與 Proton Bridge 暫不支援。", ""),
 }
 
 
 def provider_catalog(settings) -> list[dict]:
     result = [
         {"id": "gmail", "name": "Gmail / Google Workspace", "kind": "oauth", "configured": bool(settings.google_client_id and settings.google_client_secret),
-         "note": "每個帳號各自授權唯讀；需先設定 Google OAuth。Testing 模式授權通常 7 天失效。", "guide_url": "https://developers.google.com/workspace/gmail/api/auth/scopes"},
+         "note": "每個帳號各自授權讀取郵件，可選擇開啟寄信權限。Testing 模式授權通常 7 天失效。", "guide_url": "https://developers.google.com/workspace/gmail/api/auth/scopes"},
         {"id": "microsoft", "name": "Outlook / Microsoft 365", "kind": "oauth", "configured": bool(settings.microsoft_client_id and settings.microsoft_client_secret),
-         "note": "每個帳號各自授權 Mail.Read；組織帳號可能需要管理員允許。", "guide_url": "https://learn.microsoft.com/graph/permissions-reference"},
+         "note": "每個帳號各自授權 Mail.Read，可選擇開啟 Mail.Send；組織帳號可能需要管理員允許。", "guide_url": "https://learn.microsoft.com/graph/permissions-reference"},
     ]
-    for key, (name, host, note, guide) in _PRESETS.items():
-        result.append({"id": key, "name": name, "kind": "imap", "configured": True, "host": host, "port": 993, "note": note, "guide_url": guide})
+    for key, preset in _PRESETS.items():
+        entry = {"id": key, "name": preset.name, "kind": "imap", "configured": True,
+                 "host": preset.host, "port": 993, "smtp_host": preset.smtp_host, "smtp_port": preset.smtp_port,
+                 "note": preset.note, "guide_url": preset.guide_url}
+        if preset.email_domain:
+            entry["email_domain"] = preset.email_domain
+        result.append(entry)
     result.extend([
         {"id": "proton", "name": "Proton Mail", "kind": "unsupported", "configured": False, "note": "需要本機 Proton Mail Bridge（付費方案）；本版不開放內網 Bridge 連線。", "guide_url": "https://proton.me/support/imap-smtp-and-pop3-setup"},
         {"id": "tuta", "name": "Tuta", "kind": "unsupported", "configured": False, "note": "不提供一般 IMAP 存取；本版未支援。", "guide_url": "https://tuta.com/support#imap"},
@@ -72,21 +100,22 @@ def provider_catalog(settings) -> list[dict]:
     return result
 
 
-def _oauth_config(provider, settings):
+def _oauth_config(provider, settings, *, allow_reply=False):
     if provider == "gmail":
         return (settings.google_client_id, settings.google_client_secret,
                 "https://accounts.google.com/o/oauth2/v2/auth", "https://oauth2.googleapis.com/token",
-                "openid email https://www.googleapis.com/auth/gmail.readonly")
+                "openid email https://www.googleapis.com/auth/gmail.readonly" +
+                (" https://www.googleapis.com/auth/gmail.send" if allow_reply else ""))
     if provider == "microsoft":
         return (settings.microsoft_client_id, settings.microsoft_client_secret,
                 "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
                 "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-                "openid offline_access User.Read Mail.Read")
+                "openid offline_access User.Read Mail.Read" + (" Mail.Send" if allow_reply else ""))
     raise ProviderError("此郵箱不支援 OAuth 連線。")
 
 
-def oauth_authorize_url(provider, settings, state, challenge) -> str:
-    client_id, secret, endpoint, _, scope = _oauth_config(provider, settings)
+def oauth_authorize_url(provider, settings, state, challenge, *, allow_reply=False) -> str:
+    client_id, secret, endpoint, _, scope = _oauth_config(provider, settings, allow_reply=allow_reply)
     if not client_id or not secret:
         raise ProviderError("尚未設定此服務的 OAuth 應用程式。")
     params = {"client_id": client_id, "redirect_uri": f"{settings.public_url.rstrip('/')}/api/oauth/{provider}/callback",
@@ -187,8 +216,8 @@ def _token_credentials(provider, result, previous=None, *, require_refresh=True)
     return updated
 
 
-def oauth_exchange(provider, settings, code, verifier) -> dict:
-    client_id, secret, _, endpoint, scope = _oauth_config(provider, settings)
+def oauth_exchange(provider, settings, code, verifier, *, allow_reply=False) -> dict:
+    client_id, secret, _, endpoint, scope = _oauth_config(provider, settings, allow_reply=allow_reply)
     if not client_id or not secret:
         raise ProviderError("尚未設定此服務的 OAuth 應用程式。")
     fields = {"grant_type": "authorization_code", "code": code, "code_verifier": verifier,
@@ -200,7 +229,10 @@ def oauth_exchange(provider, settings, code, verifier) -> dict:
         response = _request_json(client, "POST", endpoint, data=fields, oauth=True)
     # A repeat grant may omit the refresh token. Only the verified mailbox can
     # supply its existing token, after identify_oauth resolves the provider UID.
-    return {**_token_credentials(provider, response, require_refresh=False), "client_id": client_id}
+    # OAuth permits omitting scope when all requested permissions were granted.
+    response.setdefault("scope", scope)
+    return {**_token_credentials(provider, response, require_refresh=False), "client_id": client_id,
+            "allow_reply": allow_reply}
 
 
 def _refresh(provider, credentials, settings):
@@ -209,12 +241,11 @@ def _refresh(provider, credentials, settings):
             return dict(credentials)
     except (ValueError, TypeError):
         pass
-    client_id, secret, _, endpoint, scope = _oauth_config(provider, settings)
+    client_id, secret, _, endpoint, _ = _oauth_config(provider, settings)
     if not credentials.get("refresh_token") or not client_id or not secret:
         raise ProviderError("缺少背景同步授權或應用設定，請重新連接。")
     fields = {"grant_type": "refresh_token", "refresh_token": credentials["refresh_token"], "client_id": client_id, "client_secret": secret}
-    if provider == "microsoft":
-        fields["scope"] = scope
+    # Omitting scope refreshes the original grant, including legacy read-only accounts.
     with _client() as client:
         result = _request_json(client, "POST", endpoint, data=fields, oauth=True)
     return {**_token_credentials(provider, result, credentials), "client_id": client_id}
@@ -285,6 +316,62 @@ def _decode_header(value):
         return _clean(str(make_header(decode_header(str(value or "")))))
     except (LookupError, UnicodeError, ValueError):
         return _clean(value)
+
+
+def _mailboxes(value):
+    """Return the complete address list or none. Never send to a partially parsed list."""
+    if not isinstance(value, str) or len(value) > 16384:
+        return []
+    unfolded = re.sub(r"\r?\n[ \t]+", " ", value)
+    if re.search(r"[\x00-\x08\x0a-\x1f\x7f]", unfolded):
+        return []
+    try:
+        header = policy.default.header_factory("To", unfolded)
+        if any(not isinstance(error, NonASCIILocalPartDefect) for error in header.defects) or len(header.addresses) > 100:
+            return []
+        addresses = []
+        for address in header.addresses:
+            if not address.username or not address.domain or len(address.addr_spec) > 254 or re.search(r"[\x00-\x1f\x7f]", address.addr_spec):
+                return []
+            addresses.append(address.addr_spec)
+        return list(dict.fromkeys(addresses))
+    except (ValueError, IndexError, AttributeError, HeaderParseError, RecursionError):
+        return []
+
+
+_MESSAGE_ID = re.compile(r"<[^\s<>@\x00-\x1f\x7f]+@[^\s<>@\x00-\x1f\x7f]+>")
+
+
+def _reply_headers(items):
+    fields = {}
+    for name, value in items:
+        fields.setdefault(str(name).lower(), []).append(value)
+    destination = fields.get("reply-to", fields.get("from", []))
+    recipients = _mailboxes(destination[0]) if len(destination) == 1 else []
+    ids = fields.get("message-id", [])
+    parent = str(ids[0]).strip() if len(ids) == 1 else ""
+    if len(parent) > 998 or not parent.isascii() or not _MESSAGE_ID.fullmatch(parent):
+        parent = ""
+    chain = fields.get("references", fields.get("in-reply-to", []))
+    refs = [item for item in _MESSAGE_ID.findall(str(chain[0])[:MAX_HEADER]) if item.isascii() and len(item) <= 998] if len(chain) == 1 else []
+    # Retain the root and most recent ancestors within a bounded header.
+    return {"reply_recipients": recipients, "reply_message_id": parent, "reply_references": refs[:1] + refs[1:][-15:]}
+
+
+def _graph_reply_recipients(raw):
+    targets = raw.get("replyTo")
+    if targets is None or targets == []:
+        targets = [raw.get("from")]
+    if not isinstance(targets, list) or len(targets) > 100:
+        return []
+    result = []
+    for target in targets:
+        email = target.get("emailAddress") if isinstance(target, dict) else None
+        address = email.get("address") if isinstance(email, dict) else None
+        if _mailboxes(address) != [address]:
+            return []
+        result.append(address)
+    return list(dict.fromkeys(result))
 
 
 def _date(value, fallback=None):
@@ -385,6 +472,19 @@ def _within_cutoff(received_at, cutoff):
         return False
 
 
+def _page_items(items):
+    if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+        raise ProviderError("郵箱服務回傳格式不正確。")
+    return items
+
+
+def _next_page(page, field):
+    value = page.get(field)
+    if value is not None and not isinstance(value, str):
+        raise ProviderError("郵箱分頁回應不符合預期。")
+    return value
+
+
 def _gmail_message_ids(client, base, headers, cutoff, limit):
     page_token, seen_pages, seen_ids = None, set(), set()
     while True:
@@ -396,14 +496,15 @@ def _gmail_message_ids(client, base, headers, cutoff, limit):
         if page_token:
             params["pageToken"] = page_token
         response = _request_json(client, "GET", base, headers=headers, params=params)
-        for item in response.get("messages", []):
-            remote_id = item.get("id") if isinstance(item, dict) else None
+        # Gmail may omit messages on an empty page.
+        for item in _page_items(response.get("messages", [])):
+            remote_id = item.get("id")
             if not isinstance(remote_id, str) or not remote_id:
                 raise ProviderError("郵箱服務回傳無效的郵件識別碼。")
             if remote_id not in seen_ids:
                 seen_ids.add(remote_id)
                 yield remote_id
-        page_token = response.get("nextPageToken")
+        page_token = _next_page(response, "nextPageToken")
         if not page_token:
             return
 
@@ -418,7 +519,8 @@ def _fetch_gmail(client, credentials, limit, days):
         if raw is None or "INBOX" not in raw.get("labelIds", []):
             continue  # It can be deleted or moved after the list request.
         payload = raw.get("payload", {})
-        mail_headers = {str(x.get("name", "")).lower(): x.get("value", "") for x in payload.get("headers", []) if isinstance(x, dict)}
+        header_pairs = [(str(x.get("name", "")).lower(), x.get("value", "")) for x in payload.get("headers", []) if isinstance(x, dict)]
+        mail_headers = dict(header_pairs)
         status = {"truncated": False}
         plain, htmls, attachments = _gmail_body(payload, status=status)
         plain = [text for text in plain if text.strip()]
@@ -438,6 +540,7 @@ def _fetch_gmail(client, credentials, limit, days):
         if not _within_cutoff(received, cutoff):
             continue
         messages.append({"remote_id": str(remote_id), "subject": _decode_header(mail_headers.get("subject")),
+                         "reply_thread_id": _clean(raw.get("threadId"), 512), **_reply_headers(header_pairs),
                          "sender": _decode_header(mail_headers.get("from")), "recipients": _decode_header(mail_headers.get("to")),
                          "received_at": received, "body": body, "snippet": _clean(re.sub(r"\s+", " ", body), 300),
                          "unread": "UNREAD" in raw.get("labelIds", []), "attachments": attachments[:100], "body_truncated": status["truncated"]})
@@ -474,9 +577,9 @@ def _graph_attachments(client, headers, remote_id):
         if info is None:
             return None
         params = None
-        for item in info.get("value", [])[:100 - len(attachments)]:
+        for item in _page_items(info.get("value"))[:100 - len(attachments)]:
             attachments.append({"filename": _clean(item.get("name"), 1000), "content_type": _clean(item.get("contentType"), 120), "size": _safe_size(item.get("size"))})
-        url = info.get("@odata.nextLink")
+        url = _next_page(info, "@odata.nextLink")
         if url:
             _graph_page(url, expected_path=expected_path)
             # Never follow a server page that would drop the metadata-only projection.
@@ -490,7 +593,7 @@ def _fetch_microsoft(client, credentials, limit, days):
     headers = {"Authorization": "Bearer " + credentials["access_token"], "Prefer": 'outlook.body-content-type="text", IdType="ImmutableId"'}
     cutoff = _cutoff(days)
     since = cutoff.isoformat().replace("+00:00", "Z")
-    params = {"$select": "id,subject,from,toRecipients,receivedDateTime,body,bodyPreview,isRead,hasAttachments,webLink",
+    params = {"$select": "id,subject,from,replyTo,toRecipients,receivedDateTime,body,bodyPreview,isRead,hasAttachments,webLink",
               "$filter": f"receivedDateTime ge {since}", "$orderby": "receivedDateTime desc", "$top": min(limit, 100)}
     url = "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages"
     messages, seen, seen_ids = [], set(), set()
@@ -502,11 +605,13 @@ def _fetch_microsoft(client, credentials, limit, days):
         seen.add(url)
         response = _request_json(client, "GET", _graph_page(url), headers=headers, params=params)
         params = None
-        for raw in response.get("value", []):
+        for raw in _page_items(response.get("value")):
             if len(messages) >= limit:
                 break
             remote_id = raw.get("id")
-            if not isinstance(remote_id, str) or not remote_id or remote_id in seen_ids:
+            if not isinstance(remote_id, str) or not remote_id:
+                raise ProviderError("郵箱服務回傳無效的郵件識別碼。")
+            if remote_id in seen_ids:
                 continue
             seen_ids.add(remote_id)
             raw_body = raw.get("body") or {}
@@ -533,6 +638,7 @@ def _fetch_microsoft(client, credentials, limit, days):
             sender_value = f"{sender.get('name', '')} <{sender.get('address', '')}>"
             recipients = ", ".join(str((x.get("emailAddress") or {}).get("address", "")) for x in (raw.get("toRecipients") or [])[:100])
             message = {"remote_id": remote_id, "subject": _clean(raw.get("subject")), "sender": _clean(sender_value), "recipients": _clean(recipients),
+                       "reply_recipients": _graph_reply_recipients(raw),
                        "received_at": received_at, "body": body, "snippet": _clean(raw.get("bodyPreview") or re.sub(r"\s+", " ", body), 300),
                        "unread": not bool(raw.get("isRead")), "attachments": attachments, "body_truncated": body_truncated}
             # Only provider-owned webmail links are allowed, never arbitrary URLs from data.
@@ -544,14 +650,17 @@ def _fetch_microsoft(client, credentials, limit, days):
             except ValueError:
                 pass
             messages.append(message)
-        url = response.get("@odata.nextLink")
+        url = _next_page(response, "@odata.nextLink") if len(messages) < limit else None
     return messages
 
 
-def _public_addresses(host, port):
+def _public_addresses(host, port, *, smtp=False):
+    protocol = "SMTP" if smtp else "IMAP"
     if not isinstance(host, str) or not host or len(host) > 253 or any(c in host for c in "/\\@\x00\r\n\t "):
-        raise ProviderError("IMAP 主機名稱無效。")
-    if port != 993:
+        raise ProviderError(f"{protocol} 主機名稱無效。")
+    if smtp and port not in (465, 587):
+        raise ProviderError("SMTP 僅支援 465 TLS 或 587 STARTTLS。")
+    if not smtp and port != 993:
         raise ProviderError("本版僅支援使用 TLS 的 IMAP 993 連接埠。")
     try:
         host = host.rstrip(".").encode("idna").decode("ascii")
@@ -561,12 +670,27 @@ def _public_addresses(host, port):
         for _, _, _, _, address in addresses:
             ip = ipaddress.ip_address(address[0])
             if not ip.is_global or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
-                raise ProviderError("僅允許公開網路的 IMAP 主機；不支援內網、回環或保留位址。")
+                raise ProviderError(f"僅允許公開網路的 {protocol} 主機；不支援內網、回環或保留位址。")
         return host, addresses
     except ProviderError:
         raise
     except (ValueError, UnicodeError, OSError):
-        raise ProviderError("無法解析公開 IMAP 主機，請核對伺服器設定。") from None
+        raise ProviderError(f"無法解析公開 {protocol} 主機，請核對伺服器設定。") from None
+
+
+def _pinned_socket(addresses, timeout, host, tls_context=None):
+    for family, kind, proto, _, address in addresses:
+        try:
+            sock = socket.socket(family, kind, proto)
+        except OSError:
+            continue
+        try:
+            sock.settimeout(timeout)
+            sock.connect(address)
+            return tls_context.wrap_socket(sock, server_hostname=host) if tls_context else sock
+        except OSError:
+            sock.close()
+    raise ProviderError("無法連接郵箱伺服器，請核對主機與 TLS 設定。")
 
 
 class _PinnedIMAPSSL(imaplib.IMAP4_SSL):
@@ -576,18 +700,7 @@ class _PinnedIMAPSSL(imaplib.IMAP4_SSL):
         super().__init__(host=host, port=port, ssl_context=ssl.create_default_context(), timeout=TIMEOUT)
 
     def _create_socket(self, timeout):
-        for family, kind, proto, _, address in self._addresses:
-            try:
-                sock = socket.socket(family, kind, proto)
-            except OSError:
-                continue  # A validated DNS result may use an unavailable local address family.
-            try:
-                sock.settimeout(timeout)
-                sock.connect(address)
-                return self.ssl_context.wrap_socket(sock, server_hostname=self.host)
-            except (OSError, ssl.SSLError):
-                sock.close()
-        raise ProviderError("無法建立安全 IMAP 連線，請核對主機與 TLS 憑證。")
+        return _pinned_socket(self._addresses, timeout, self.host, self.ssl_context)
 
     def read(self, size):
         if size > MAX_WIRE_BODY + MAX_HEADER:
@@ -615,6 +728,14 @@ def _imap_mailbox_name(value):
     return "".join(parts)
 
 
+def _logout_imap(client):
+    if client is not None:
+        try:
+            client.logout()
+        except Exception:
+            pass  # Cleanup must not replace the result of the mailbox operation.
+
+
 def _imap_open(credentials):
     username, password = credentials.get("username") or credentials.get("email"), credentials.get("password")
     folder = credentials.get("folder") or "INBOX"
@@ -627,28 +748,20 @@ def _imap_open(credentials):
         quoted_username = '"' + username.replace("\\", "\\\\").replace('"', '\\"') + '"'
         client.login(quoted_username, password)
         # NetEase requires an RFC 2971 client ID on some mailboxes. No personal data.
-        if credentials.get("host", "").lower() in {"imap.163.com", "imap.126.com", "imap.yeah.net"} and any(cap in client.capabilities for cap in ("ID", b"ID")):
+        if credentials.get("host", "").lower() in _NETEASE_HOSTS and any(cap in client.capabilities for cap in ("ID", b"ID")):
             if "ID" not in imaplib.Commands:
                 imaplib.Commands["ID"] = ("AUTH", "SELECTED")
             client._simple_command("ID", '("name" "MailHarbor" "version" "1.0")')
         encoded_folder = _imap_mailbox_name(folder)
         typ, _ = client.select('"' + encoded_folder.replace("\\", "\\\\").replace('"', '\\"') + '"', readonly=True)
         if typ != "OK":
-            client.logout()
             raise ProviderError("無法唯讀開啟指定資料夾，請核對名稱與 IMAP 權限。")
         return client
     except ProviderError:
-        if client is not None:
-            try:
-                client.logout()
-            except Exception:
-                pass
+        _logout_imap(client)
         raise
     except (imaplib.IMAP4.error, OSError, ValueError, TypeError, UnicodeError):
-        try:
-            client.logout()
-        except Exception:
-            pass
+        _logout_imap(client)
         raise ProviderError("IMAP 連線失敗，請檢查帳號、授權碼、服務開關及資料夾設定。") from None
 
 
@@ -662,10 +775,7 @@ def probe_imap(credentials) -> dict:
         identity = f"{credentials['host'].lower()}\0{username.lower()}\0{credentials.get('folder') or 'INBOX'}"
         return {"email": email[:320], "provider_uid": hashlib.sha256(identity.encode()).hexdigest()}
     finally:
-        try:
-            client.logout()
-        except Exception:
-            pass
+        _logout_imap(client)
 
 
 def _imap_tokens(data):
@@ -845,7 +955,7 @@ def _fetch_imap(credentials, limit, days):
             except (ValueError, IndexError, TypeError):
                 raise ProviderError("無法解析郵件 MIME 結構。") from None
             sections, attachments = _mime_sections(structure)
-            header_bytes = _fetch_literal(client, uid, "HEADER.FIELDS (SUBJECT FROM TO DATE MESSAGE-ID)", MAX_HEADER)
+            header_bytes = _fetch_literal(client, uid, "HEADER.FIELDS (SUBJECT FROM TO DATE MESSAGE-ID REPLY-TO REFERENCES IN-REPLY-TO)", MAX_HEADER)
             if header_bytes is None:
                 continue
             header = BytesParser(policy=policy.default).parsebytes(header_bytes, headersonly=True)
@@ -895,6 +1005,7 @@ def _fetch_imap(credentials, limit, days):
             body = _clean(combined, MAX_BODY)
             flags = re.search(rb"FLAGS\s+\(([^)]*)\)", structure_bytes, re.I)
             messages.append({"remote_id": f"{validity}:{uid.decode('ascii')}", "subject": _decode_header(header.get("Subject")),
+                             **(_reply_headers(header.raw_items()) if len(header_bytes) < MAX_HEADER and not header.defects else {"reply_recipients": []}),
                              "sender": _decode_header(header.get("From")), "recipients": _decode_header(header.get("To")),
                              "received_at": received, "snippet": _clean(re.sub(r"\s+", " ", body), 300), "body": body,
                              "unread": not bool(flags and re.search(rb"(?:^|\s)\\Seen(?:$|\s)", flags.group(1), re.I)), "attachments": attachments[:100], "body_truncated": body_truncated})
@@ -906,10 +1017,7 @@ def _fetch_imap(credentials, limit, days):
     except (imaplib.IMAP4.error, OSError, ValueError, TypeError, UnicodeError, IndexError, KeyError):
         raise ProviderError("IMAP 同步未完成，請稍後重試或核對郵箱設定。") from None
     finally:
-        try:
-            client.logout()
-        except Exception:
-            pass
+        _logout_imap(client)
 
 
 def fetch_messages(provider, credentials, settings, limit=200, days=30, *, on_credentials_updated=None) -> tuple[list[dict], dict]:
@@ -928,7 +1036,7 @@ def fetch_messages(provider, credentials, settings, limit=200, days=30, *, on_cr
             return messages, updated
         if provider in _PRESETS:
             effective = dict(credentials)
-            expected_host = _PRESETS[provider][1]
+            expected_host = _PRESETS[provider].host
             if expected_host:
                 effective["host"] = expected_host
             return _fetch_imap(effective, limit, days), dict(credentials)
@@ -937,3 +1045,164 @@ def fetch_messages(provider, credentials, settings, limit=200, days=30, *, on_cr
         raise
     except (ValueError, TypeError, AttributeError, KeyError, IndexError, UnicodeError, RecursionError):
         raise ProviderError("郵件服務回應格式無法處理，請稍後重試。") from None
+
+
+def reply_unavailable_reason(provider, credentials):
+    if provider in ("gmail", "microsoft"):
+        scopes = set(str(credentials.get("scope", "")).lower().split())
+        send = {"https://www.googleapis.com/auth/gmail.send"} if provider == "gmail" else {"mail.send", "https://graph.microsoft.com/mail.send"}
+        return None if credentials.get("allow_reply") is True and scopes & send else "reauth_required"
+    if provider == "custom":
+        return None if credentials.get("smtp_host") else "smtp_not_configured"
+    return None if provider in _PRESETS and _PRESETS[provider].smtp_host else "unsupported"
+
+
+def _require_reply_access(provider, credentials):
+    reason = reply_unavailable_reason(provider, credentials)
+    if reason == "reauth_required":
+        raise ProviderError("請重新連接郵箱並授予寄信權限。", code=reason, reauth_required=True)
+    if reason == "smtp_not_configured":
+        raise ProviderError("請在自訂郵箱連線中設定 SMTP 主機與連接埠。", code=reason)
+    if reason:
+        raise ProviderError("此郵箱服務不支援回覆。", code=reason)
+
+
+def _delivery_unknown():
+    return ProviderError("無法確認郵箱服務是否已接受回覆，請先檢查寄件備份。", code="delivery_unknown")
+
+
+def _submit_http_reply(client, url, headers, payload):
+    import httpx
+
+    try:
+        with client.stream("POST", url, headers=headers, json=payload) as response:
+            # Graph replies have an empty 202 body. Gmail's 200 is also acceptance.
+            if 200 <= response.status_code < 300:
+                return
+            if response.status_code >= 500 or response.status_code == 408:
+                raise _delivery_unknown()
+            raise _http_error(response.status_code)
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
+        raise ProviderError("無法連接寄信服務，請稍後重試。", code="network_error") from None
+    except httpx.HTTPError:
+        raise _delivery_unknown() from None
+
+
+def _mime_reply(original, recipients, body, *, keep_subject=False):
+    sender = original.get("account_email")
+    if not sender or _mailboxes(sender) != [sender]:
+        raise ProviderError("寄件郵箱地址無效。", code="invalid_sender")
+    international = not sender.isascii() or any(not address.isascii() for address in recipients)
+    msg = EmailMessage(policy=policy.SMTPUTF8 if international else policy.SMTP)
+    msg["From"], msg["To"] = sender, ", ".join(recipients)
+    subject = re.sub(r"[\x00-\x1f\x7f]+", " ", str(original.get("subject") or "")).strip()
+    msg["Subject"] = subject if keep_subject or subject.lower().startswith("re:") else "Re: " + subject
+    msg["Date"] = format_datetime(datetime.now(timezone.utc))
+    msg["Message-ID"] = make_msgid(domain=sender.rsplit("@", 1)[1])
+    parent = original.get("reply_message_id")
+    if parent and _MESSAGE_ID.fullmatch(parent):
+        msg["In-Reply-To"] = parent
+        refs = [item for item in original.get("reply_references", []) if _MESSAGE_ID.fullmatch(item) and item != parent]
+        msg["References"] = " ".join([*refs, parent])
+    msg.set_content(body, cte="base64")
+    return msg
+
+
+class _PinnedSMTP(smtplib.SMTP):
+    def __init__(self, host, port):
+        host, self._addresses = _public_addresses(host, port, smtp=True)
+        self._tls = ssl.create_default_context()
+        super().__init__(host=host, port=port, local_hostname="localhost", timeout=TIMEOUT)
+        if port == 587:
+            try:
+                self.starttls(context=self._tls)
+            except Exception:
+                self.close()
+                raise
+
+    def _get_socket(self, host, port, timeout):
+        return _pinned_socket(self._addresses, timeout, host, self._tls if port == 465 else None)
+
+
+def _submit_smtp_reply(provider, credentials, msg, recipients):
+    preset = _PRESETS[provider]
+    if provider == "custom":
+        host, port = credentials.get("smtp_host"), credentials.get("smtp_port", preset.smtp_port)
+    else:
+        host, port = preset.smtp_host, preset.smtp_port
+    username = credentials.get("username") or credentials["email"]
+    if provider == "icloud":
+        username = credentials["email"]
+    wire = msg.as_bytes()
+    client = None
+    try:
+        client = _PinnedSMTP(host, port)
+        client.login(username, credentials["password"])
+        options = []
+        if msg.policy.utf8:
+            if not client.has_extn("smtputf8"):
+                raise ProviderError("SMTP 服務不支援此國際化郵箱地址。")
+            options = ["SMTPUTF8", "BODY=8BITMIME"]
+        status, _ = client.mail(str(msg["From"]), options)
+        if status != 250:
+            raise ProviderError("SMTP 服務拒絕寄件地址。")
+        for address in recipients:
+            status, _ = client.rcpt(address)
+            if status not in (250, 251, 252):
+                raise ProviderError("SMTP 服務拒絕回覆收件人，郵件未寄出。")
+        # Send DATA only after every recipient was accepted.
+        try:
+            status, _ = client.data(wire)
+        except smtplib.SMTPResponseException:
+            raise ProviderError("SMTP 服務拒絕此回覆。") from None
+        except OSError:
+            raise _delivery_unknown() from None
+        if status != 250:
+            raise ProviderError("SMTP 服務拒絕此回覆。")
+    except smtplib.SMTPAuthenticationError:
+        raise ProviderError("SMTP 驗證失敗，請檢查寄信權限與授權碼。") from None
+    except (OSError, UnicodeError, ValueError):
+        raise ProviderError("無法透過安全 SMTP 連線寄信，請檢查伺服器設定。") from None
+    finally:
+        if client:
+            try:
+                client.close()
+            except OSError:
+                pass  # A cleanup error cannot reverse a confirmed DATA result.
+
+
+def send_reply(provider, credentials, settings, message, body, *, on_credentials_updated=None):
+    """Submit one reply using only the server's original message and mailbox identity."""
+    _require_reply_access(provider, credentials)
+    if not isinstance(body, str) or not body.strip() or len(body) > MAX_BODY or "\x00" in body:
+        raise ProviderError("回覆內容無效。", code="invalid_reply")
+    if "reply_recipients" not in message:
+        raise ProviderError("請先同步原郵件，再回覆。", code="sync_required")
+    recipients = message["reply_recipients"]
+    if not isinstance(recipients, list) or not 1 <= len(recipients) <= 100 or any(_mailboxes(addr) != [addr] for addr in recipients):
+        raise ProviderError("原郵件沒有可驗證的回覆地址。", code="invalid_recipient")
+    if provider not in ("gmail", "microsoft"):
+        _submit_smtp_reply(provider, credentials, _mime_reply(message, recipients, body), recipients)
+        return
+    updated = _refresh(provider, credentials, settings)
+    if on_credentials_updated and updated != credentials:
+        on_credentials_updated(updated)
+    _require_reply_access(provider, updated)
+    headers = {"Authorization": "Bearer " + updated["access_token"]}
+    if provider == "gmail":
+        if not message.get("reply_thread_id") or not _MESSAGE_ID.fullmatch(message.get("reply_message_id") or ""):
+            raise ProviderError("原郵件缺少有效的 Gmail 會話或郵件識別碼。", code="thread_unavailable")
+        # Gmail requires matching subjects as well as threadId and RFC reply headers.
+        mime = _mime_reply(message, recipients, body, keep_subject=True)
+        url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+        payload = {"raw": base64.urlsafe_b64encode(mime.as_bytes()).decode("ascii"), "threadId": message["reply_thread_id"]}
+    else:
+        remote = quote(message["remote_id"], safe="")
+        if remote in ("", ".", ".."):
+            raise ProviderError("原郵件識別碼無效。", code="invalid_reply")
+        url = f"https://graph.microsoft.com/v1.0/me/messages/{remote}/reply"
+        headers["Prefer"] = 'IdType="ImmutableId"'
+        payload = {"message": {"toRecipients": [{"emailAddress": {"address": addr}} for addr in recipients],
+                               "body": {"contentType": "Text", "content": body}}}
+    with _client() as client:
+        _submit_http_reply(client, url, headers, payload)

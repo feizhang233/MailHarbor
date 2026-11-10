@@ -5,6 +5,7 @@
 !mailhub/config.py
 !mailhub/oauth_server.py
 !mailhub/providers.py
+!mailhub/replies.py
 !mailhub/static/app.css
 !mailhub/static/app.js
 !mailhub/static/i18n.js
@@ -13,3 +14,4 @@
 !mailhub/static/tokens.css
 !mailhub/stdio_bridge.py
 !mailhub/store.py
+!mailhub/sync.py

@@ -3,15 +3,15 @@
 import argparse
 import base64
 import getpass
-import hashlib
 import os
 from pathlib import Path
 import secrets
 import sys
 from urllib.parse import urlsplit
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from mailhub.config import normalize_origin
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from mailhub.config import make_hash, normalize_origin
 
 
 def validate_url(value: str) -> tuple[str, str]:
@@ -22,12 +22,6 @@ def validate_url(value: str) -> tuple[str, str]:
 def validate_password(password: str) -> None:
     if not 12 <= len(password) <= 1024:
         raise ValueError("密碼需要 12–1024 字元，未寫入任何設定。")
-
-
-def make_hash(password: str, salt: bytes | None = None) -> str:
-    salt = salt or secrets.token_bytes(16)
-    derived = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**14, r=8, p=1, dklen=64)
-    return salt.hex() + ":" + derived.hex()
 
 
 def main() -> None:

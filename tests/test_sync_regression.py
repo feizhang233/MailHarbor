@@ -4,6 +4,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+from concurrent.futures import ThreadPoolExecutor
 
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
@@ -14,6 +15,33 @@ from mailhub.store import Store
 
 
 class SyncRegressionTests(unittest.TestCase):
+    def test_reply_waiting_for_sync_rechecks_the_original_before_sending(self):
+        from mailhub.replies import MailboxReplies, ReplyError
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(directory, Fernet.generate_key().decode())
+            credentials = {"email": "fixture@example.test", "smtp_host": "smtp.example.test"}
+            account = store.save_account("custom", {**credentials, "provider_uid": "fixture"}, credentials)
+            store.replace_snapshot(account["id"], [{"remote_id": "message", "reply_recipients": ["sender@example.test"]}], credentials)
+            message_id = store.search()["messages"][0]["id"]
+            replies = MailboxReplies(store)
+            lock = replies.account_lock(account["id"])
+            waiting = threading.Event()
+
+            def get_lock(account_id):
+                waiting.set()
+                return lock
+
+            with patch.object(replies, "account_lock", side_effect=get_lock), patch("mailhub.providers.send_reply") as send, \
+                 ThreadPoolExecutor(max_workers=1) as pool:
+                with lock:
+                    future = pool.submit(replies.submit, None, "owner", message_id, "fixture", "hello")
+                    self.assertTrue(waiting.wait(3))
+                    store.replace_snapshot(account["id"], [], credentials)
+                with self.assertRaises(ReplyError) as problem:
+                    future.result()
+                self.assertEqual(problem.exception.status, 404)
+                send.assert_not_called()
+
     def test_graph_pagination_failure_preserves_previous_snapshot_and_freshness(self):
         with tempfile.TemporaryDirectory() as directory:
             settings = Settings(key=Fernet.generate_key().decode(), admin_hash="synthetic-test-hash",
@@ -33,8 +61,8 @@ class SyncRegressionTests(unittest.TestCase):
             failed = threading.Event()
             set_status = store.set_status
 
-            def record_status(account_id, status, error=None, generation=None):
-                set_status(account_id, status, error, generation)
+            def record_status(account_id, status, error=None, generation=None, *, user_id):
+                set_status(account_id, status, error, generation, user_id=user_id)
                 if status == "error":
                     failed.set()
 

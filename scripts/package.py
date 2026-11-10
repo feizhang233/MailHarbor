@@ -8,7 +8,8 @@ import sys
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+if not __package__:
+    sys.path.insert(0, str(ROOT))
 from mailhub.config import normalize_origin
 # Keep release contents explicit even when packaging an extracted copy without Git.
 SOURCE_FILES = (
@@ -32,12 +33,14 @@ SOURCE_FILES = (
     "integrations/codex.oauth.toml.example",
     "integrations/cursor.bearer.json.example",
     "integrations/cursor.oauth.json.example",
+    "integrations/deepseek-harness.cordis.yml.example",
     "integrations/rest_client.py",
     "mailhub/__init__.py",
     "mailhub/app.py",
     "mailhub/config.py",
     "mailhub/oauth_server.py",
     "mailhub/providers.py",
+    "mailhub/replies.py",
     "mailhub/static/app.css",
     "mailhub/static/app.js",
     "mailhub/static/i18n.js",
@@ -46,6 +49,7 @@ SOURCE_FILES = (
     "mailhub/static/tokens.css",
     "mailhub/stdio_bridge.py",
     "mailhub/store.py",
+    "mailhub/sync.py",
     "plugin/README.md",
     "plugin/mcp.json",
     "plugin/plugin.json",
@@ -61,6 +65,8 @@ SOURCE_FILES = (
     "tests/live_smoke.py",
     "tests/test_core.py",
     "tests/test_csrf_regression.py",
+    "tests/test_iam.py",
+    "tests/test_iam_store.py",
     "tests/test_integrations.py",
     "tests/test_oauth_server.py",
     "tests/test_providers.py",
@@ -92,9 +98,10 @@ def make_source_zip(output: Path) -> int:
 
 
 def plugin_url(origin: str) -> str:
-    canonical = normalize_origin(origin)
-    if not canonical.startswith("https://"):
-        raise ValueError("外掛需要不含帳密的 HTTPS 網址。")
+    try:
+        canonical = normalize_origin(origin, allow_loopback_http=False)
+    except ValueError:
+        raise ValueError("外掛需要不含帳密的 HTTPS 網址。") from None
     return canonical + "/mcp"
 
 

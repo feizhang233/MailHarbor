@@ -1,10 +1,12 @@
 # AI 客戶端的 OAuth 連線
 
-MailHarbor 的 OAuth 服務讓支援 MCP OAuth 的 AI 客戶端在管理頁請求唯讀授權。這與「連接 Gmail／Microsoft 郵箱」的供應商 OAuth 是兩套獨立流程：前者決定 AI 能否讀取快取，後者決定 MailHarbor 能否從郵箱同步。
+MailHarbor 的 OAuth 服務讓 AI 客戶端請求讀取郵件快取，以及選用的回覆權限。每次授權都會在 MailHarbor 管理頁顯示請求的權限，由目前登入的使用者核准。
 
-在客戶端加入正式 HTTPS MCP 端點，例如 `https://mail.example.com/mcp`。選擇 OAuth／動態客戶端註冊。客戶端會自動發現授權端點，開啟 MailHarbor 管理頁；登入後，畫面顯示應用程式自報名稱、回呼網址、資源和 `mail.read` 權限。確認後按允許，或按拒絕返回客戶端。應用程式自報名稱未經 MailHarbor 驗證，請一併核對回呼網域。
+在客戶端加入正式 HTTPS MCP 端點，例如 `https://mail.example.com/mcp`，然後選擇 OAuth／動態客戶端註冊。登入後，核對應用程式自報名稱、回呼網域及要求的權限，再按允許或拒絕。省略授權請求的 scope 時只會核發 `mail.read`。要讓客戶端發出回覆，請明確要求 `mail.read mail.reply`。已取得的唯讀授權需重新取得同意。舊版只註冊 `mail.read` 的客戶端需重新註冊連線。
 
-此權限涵蓋目前與日後連接的所有郵箱快取，僅能讀取，不能管理帳號、修改設定、發信、刪信或標記已讀。尚未提供每個應用只可讀指定郵箱的權限分組。
+每筆授權涵蓋該使用者目前與日後連接的所有郵箱。應用可用 `mail.read` 搜尋及閱讀郵件。另授予 `mail.reply` 後，應用可透過支援寄信的來源郵箱回覆指定的快取郵件。使用者可在工作台查看各應用的權限或撤銷授權。
+
+郵箱服務也需要授權發信。先前只允許同步的 Gmail 或 Microsoft 郵箱，請在工作台重新連接同一帳號，勾選「允許此郵箱寄送回覆」，再依供應商提示授予 Gmail 的 `gmail.send` 或 Microsoft Graph 的 `Mail.Send`。IMAP 郵箱透過 SMTP 提交回覆，自訂 IMAP 需設定 SMTP 主機與連接埠。
 
 ## 支援的協定
 
@@ -17,7 +19,7 @@ MailHarbor 的 OAuth 服務讓支援 MCP OAuth 的 AI 客戶端在管理頁請�
 | 授權 | `GET /oauth/authorize`，authorization code＋PKCE S256 |
 | 換取／刷新 token | `POST /oauth/token`，`application/x-www-form-urlencoded` |
 | 撤銷 token | `POST /oauth/revoke`，相同格式，傳 `client_id` 與 `token` |
-| 唯一 scope | `mail.read` |
+| 授權範圍 | 預設 `mail.read`，可一併要求 `mail.reply` |
 | 唯一 OAuth resource | 正式來源網址加 `/mcp`，每次授權與換 token 必須精確匹配 |
 | 回呼安全性 | 註冊的完整 HTTPS URI，或原生客戶端的 HTTP loopback URI；不接受萬用字元、自訂 scheme、fragment 或內嵌帳密 |
 | Issuer 識別 | 授權成功／拒絕回呼包含 RFC 9207 `iss`，並在 metadata 宣告支援 |
@@ -31,9 +33,10 @@ MailHarbor 的 OAuth 服務讓支援 MCP OAuth 的 AI 客戶端在管理頁請�
 - Access token 最長 1 小時，只能存取 `/mcp` audience。手動 Bearer 金鑰是獨立路徑；不要將 OAuth token 用於 `/v1` REST API。
 - Refresh token family 最長 30 天，每次刷新輪替，舊 refresh token 的有效重放會撤銷整個 family；舊 access token 也會在刷新時退役。
 - 伺服器只儲存 token 的雜湊；授權請求與 code 的敏感 payload 使用既有外置金鑰加密。重啟服務不會遺失有效的 OAuth grant。
-- 管理頁「已授權應用程式」可以撤銷 grant，之後的存取立即失效。這不會撤銷 Gmail／Microsoft 的郵箱同步授權。
+- 可在刷新時指定 `scope=mail.read` 取得唯讀 access token。輪替後的 refresh token 沿用當初核准的範圍。要永久移除某個應用的回覆權限，先撤銷舊授權，再核准新的唯讀請求。
+- 管理頁「已授權應用程式」可以撤銷 grant，之後的存取立即失效。Gmail／Microsoft 的郵箱授權可在供應商的帳號設定中另外管理。
 
-公開註冊與授權有頻率和總量限制。尚未完成授權、超過 4 小時的閒置 client 可被清理；若首次連線停留過久，請在 AI 客戶端重新建立連線。已授權 client 會保留。程式目前以單一服務執行緒／程序模型管理私人使用，不是多租戶 OAuth 平台。
+公開的 `/oauth/register` 供 AI 客戶端註冊應用程式，人員帳號則由登入頁透過 `/api/register` 建立。OAuth 客戶端註冊與授權有頻率和總量限制。尚未完成授權、超過 4 小時的閒置 client 可被清理。若首次連線停留過久，請在 AI 客戶端重新建立連線。已授權 client 會保留。
 
 ## 主應用整合契約
 
@@ -41,22 +44,25 @@ MailHarbor 的 OAuth 服務讓支援 MCP OAuth 的 AI 客戶端在管理頁請�
 oauth = OAuthServer(lambda: current_settings, store, owner_session=session_for)
 app.include_router(oauth.router)  # 必須在根 catch-all MCP mount 之前
 
-# 僅在 /mcp 的 Bearer 驗證路徑使用；不可接受瀏覽器 session 代替。
-oauth.validate_access_token(token)
+# /mcp 的 OAuth Bearer 驗證
+access = oauth.access_token_access(token)
+if access is None:
+    raise HTTPException(status_code=401)
+user_id, scope = access
 ```
 
-`owner_session` 必須驗證主應用的 owner session 並傳回含 `csrf` 的字典或 `None`。未提供驗證函數時，所有 consent／grant 管理路由會拒絕操作；不能把獨立 router 掛載後只依 cookie 名稱判斷已登入。
+`owner_session` 是主應用的瀏覽器會話驗證函數。登入的管理員或成員應傳回含可信 `user_id` 與 `csrf` 的會話字典，未登入或過期則傳回 `None`。MCP 工具以 Bearer token 解析出的 `user_id` 查詢郵箱與郵件，回覆工具另須檢查 `mail.reply`。`/v1` 由 `store.token_access(token)` 解析手動金鑰的使用者與權限。舊金鑰與預設建立的新金鑰都只有讀取權限。
 
-未授權的 MCP 請求應返回 401 與：
+未授權的 MCP 請求返回 401，並附上資源探索標頭。
 
 ```http
-WWW-Authenticate: Bearer resource_metadata="https://mail.example.com/.well-known/oauth-protected-resource/mcp", scope="mail.read"
+WWW-Authenticate: Bearer realm="MailHarbor", resource_metadata="https://mail.example.com/.well-known/oauth-protected-resource/mcp"
 ```
 
-主應用的同源、CSRF、Host、body-size 限制仍需保留。OAuth token 端點不使用 owner cookie，僅依 code／refresh token 的密碼學綁定換取權限。
+主應用的同源、CSRF、Host、body-size 限制仍需保留。OAuth token 端點使用 code 或 refresh token 的密碼學綁定確認權限，換發的 token 沿用原授權的使用者身分。
 
 ## 驗證狀態
 
-新增測試包含 discovery/DCR、錯誤 metadata、回呼與 audience、PKCE、owner session／CSRF、同意／拒絕、請求逾期、code 重放、refresh 輪替／重放、token 雜湊、撤銷、失敗請求限流及舊註冊清理。純格式／PKCE 測試可離線執行；ASGI 和加密資料庫測試需要安裝 FastAPI、httpx、cryptography。未取得真實 AI 客戶端完成登入的證據前，不將此協定實作描述為已完成 ChatGPT 實際連線驗證。
+測試涵蓋 discovery/DCR、錯誤 metadata、回呼與 audience、PKCE、使用者會話與 CSRF、同意／拒絕、授權隔離、請求逾期、code 重放、refresh 輪替／重放、token 雜湊、撤銷、失敗請求限流及舊註冊清理。純格式／PKCE 測試可離線執行。ASGI 和加密資料庫測試需要安裝 FastAPI、httpx、cryptography。真實 AI 客戶端的登入流程需在部署環境另行驗證。
 
 官方參考：[OpenAI MCP authentication](https://developers.openai.com/plugins/build/auth)、[OpenAI OAuth plugin configuration](https://developers.openai.com/plugins/build/plugins)、[MCP authorization](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization)、[RFC 7636 PKCE](https://www.rfc-editor.org/rfc/rfc7636)、[RFC 9207 issuer identification](https://www.rfc-editor.org/rfc/rfc9207)、[RFC 7009 revocation](https://www.rfc-editor.org/rfc/rfc7009)。

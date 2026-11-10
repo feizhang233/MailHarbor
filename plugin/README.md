@@ -2,6 +2,8 @@
 
 本資料夾採 Agent Plugins 格式：`plugin.json` 定義外掛，`mcp.json` 宣告遠端 Streamable HTTP 端點，使用 OAuth discovery、公開用戶端 DCR、S256 PKCE 與 `mail.read` scope。`resource` 精確綁定該部署的 `/mcp`。
 
+範本預設只讀。要讓外掛回覆郵件，在匯入前將產生的 `mcp.json` 中的 `baseScopes` 設為 `["mail.read", "mail.reply"]`，再登入並核准該權限。
+
 從專案根目錄產生你的版本：
 
 ```sh

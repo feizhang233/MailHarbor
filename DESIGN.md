@@ -27,7 +27,7 @@
 
 ## Overview
 
-MailHarbor is a private, single-owner mailbox control room. Its purpose is to let the owner connect many mailboxes, inspect the synchronized messages, and grant read-only access to Codex. The physical reference is a harbor dispatch board: a quiet persistent navigation rail, account labels beside each message, explicit timestamps, and green connection states. The memorable signature is the compact mailbox routing strip above the inbox, showing the actual scope of synchronized mail.
+MailHarbor gives each account a private mailbox workspace. Each user can connect mailboxes, read and reply to synchronized messages. AI clients receive read access by default. Mailbox owners can also grant reply access. The navigation rail identifies the signed-in user beside the logout control. The physical reference is a harbor dispatch board: a quiet persistent navigation rail, account labels beside each message, explicit timestamps, and green connection states. The memorable signature is the compact mailbox routing strip above the inbox, showing the actual scope of synchronized mail.
 
 This is a product interface, not a marketing page. The audience uses desktop and phone, with a selectable interface language and arbitrary multilingual email content. Europe/Belgrade is the displayed timestamp timezone. No Japan-market business scope is implied. The evidence is CONTRACT.md and the user's multi-mailbox/VPS request. Avoid oversized dashboards, fictional statistics, decorative maritime images, and cards that conceal synchronization failures.
 
